@@ -77,6 +77,34 @@ WebDAV file sync for group libraries**, so file operations only work on your per
 Optional vars in `wrangler.jsonc`: `CONTACT_EMAIL` (polite-pool access to CrossRef and OpenAlex),
 `EMBEDDING_MODEL`, `SYNC_BATCH_LIMIT`, `AUTH_USERNAME`.
 
+### Deploy releases with GitHub Actions
+
+The [CD workflow](.github/workflows/cd.yml) deploys the exact tag whenever a GitHub Release is
+published. Add these repository or `production` environment secrets under **Settings → Secrets and
+variables → Actions**:
+
+| GitHub secret | Value |
+|---|---|
+| `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account ID that owns the Worker and domain |
+| `CLOUDFLARE_API_TOKEN` | A scoped Cloudflare API token used by Wrangler |
+| `ZOTERO_MCP_DOMAIN` | Bare hostname, for example `zotero-mcp.example.com` |
+| `ZOTERO_API_KEY` | Zotero API key with read/write access |
+| `WEBDAV_URL` | WebDAV root configured in Zotero; `/zotero` is appended |
+| `WEBDAV_USERNAME` | WebDAV username |
+| `WEBDAV_PASSWORD` | WebDAV password |
+| `AUTH_PASSWORD` | Long password protecting the OAuth authorization page |
+
+Create the API token from Cloudflare's **Edit Cloudflare Workers** template and restrict its account
+and zone resources to this deployment. The token must be able to edit Workers scripts, create the
+two KV namespaces on the first deployment, and attach the Worker to the custom domain. The
+Vectorize index and both metadata indexes still need to be created once with the commands in step 1
+above; the workflow deliberately does not recreate persistent resources during every release.
+
+Publishing a release runs the normal format, lint, type and test checks before deployment. The five
+runtime secrets are then uploaded with the Worker as one version; they are never written to the
+repository or printed in the job log. GitHub's `production` environment is optional, but creating it
+lets you add required reviewers or deployment protection rules.
+
 ## Connect a client
 
 The server is a normal OAuth-protected MCP endpoint at `https://<your-domain>/mcp`.

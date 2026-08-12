@@ -1,0 +1,96 @@
+name: CD
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy release to Cloudflare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate deployment secrets
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ZOTERO_MCP_DOMAIN: ${{ secrets.ZOTERO_MCP_DOMAIN }}
+          ZOTERO_API_KEY: ${{ secrets.ZOTERO_API_KEY }}
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
+          WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+        run: |
+          missing=0
+          for name in \
+            CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN ZOTERO_MCP_DOMAIN \
+            ZOTERO_API_KEY WEBDAV_URL WEBDAV_USERNAME WEBDAV_PASSWORD AUTH_PASSWORD
+          do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing GitHub secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Verify release
+        run: |
+          bun run format:check
+          bun run lint
+          bun run typecheck
+          bun test
+
+      # Deploy code and Worker secrets as one version. Omitted secrets on an
+      # existing Worker are preserved by Wrangler.
+      - name: Create temporary Worker secrets file
+        env:
+          ZOTERO_API_KEY: ${{ secrets.ZOTERO_API_KEY }}
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
+          WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+        run: |
+          jq -n '{
+            ZOTERO_API_KEY: env.ZOTERO_API_KEY,
+            WEBDAV_URL: env.WEBDAV_URL,
+            WEBDAV_USERNAME: env.WEBDAV_USERNAME,
+            WEBDAV_PASSWORD: env.WEBDAV_PASSWORD,
+            AUTH_PASSWORD: env.AUTH_PASSWORD
+          }' > "$RUNNER_TEMP/worker-secrets.json"
+          chmod 600 "$RUNNER_TEMP/worker-secrets.json"
+
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ZOTERO_MCP_DOMAIN: ${{ secrets.ZOTERO_MCP_DOMAIN }}
+        run: >-
+          bun run deploy
+          --secrets-file="$RUNNER_TEMP/worker-secrets.json"
+          --message="GitHub release ${{ github.event.release.tag_name }}"
+
+      - name: Remove temporary Worker secrets file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/worker-secrets.json"
