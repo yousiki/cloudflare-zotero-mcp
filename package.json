@@ -1,5 +1,5 @@
 {
-  "name": "zotero-mcp",
+  "name": "cloudflare-zotero-mcp",
   "version": "0.1.0",
   "description": "Remote MCP server for Zotero libraries synced with WebDAV file storage, running on Cloudflare Workers",
   "// private": "Not an npm package — you deploy this Worker, you do not install it. Guards against an accidental publish; unrelated to the MIT license below.",
@@ -8,10 +8,10 @@
   "author": "yousiki",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yousiki/zotero-mcp.git"
+    "url": "git+https://github.com/yousiki/cloudflare-zotero-mcp.git"
   },
-  "homepage": "https://github.com/yousiki/zotero-mcp#readme",
-  "bugs": "https://github.com/yousiki/zotero-mcp/issues",
+  "homepage": "https://github.com/yousiki/cloudflare-zotero-mcp#readme",
+  "bugs": "https://github.com/yousiki/cloudflare-zotero-mcp/issues",
   "keywords": [
     "zotero",
     "mcp",

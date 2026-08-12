@@ -2,7 +2,7 @@ import type { FetchLike } from '../http.js';
 import type { ZoteroCreator } from '../zotero/types.js';
 import { type Identifier, normalizeDoi } from './identifiers.js';
 
-const USER_AGENT = 'zotero-mcp (https://github.com/yousiki/zotero-mcp)';
+const USER_AGENT = 'cloudflare-zotero-mcp (https://github.com/yousiki/cloudflare-zotero-mcp)';
 
 /** A resolved reference, in Zotero's field vocabulary. */
 export interface ResolvedReference {

@@ -240,7 +240,9 @@ async function resolveUpload(input: {
   if (!input.sourceUrl) throw new Error('Provide sourceUrl or base64Data.');
 
   const response = await fetch(input.sourceUrl, {
-    headers: { 'User-Agent': 'zotero-mcp (+https://github.com/yousiki/zotero-mcp)' },
+    headers: {
+      'User-Agent': 'cloudflare-zotero-mcp (+https://github.com/yousiki/cloudflare-zotero-mcp)',
+    },
     redirect: 'follow',
   });
   if (!response.ok) {

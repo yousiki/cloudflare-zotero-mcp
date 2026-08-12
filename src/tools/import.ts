@@ -143,7 +143,9 @@ async function attachPdfFrom(
   url: string,
 ): Promise<string> {
   const response = await fetch(url, {
-    headers: { 'User-Agent': 'zotero-mcp (+https://github.com/yousiki/zotero-mcp)' },
+    headers: {
+      'User-Agent': 'cloudflare-zotero-mcp (+https://github.com/yousiki/cloudflare-zotero-mcp)',
+    },
     redirect: 'follow',
   });
   if (!response.ok) throw new Error(`the server returned ${response.status}`);

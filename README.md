@@ -1,4 +1,4 @@
-# zotero-mcp
+# cloudflare-zotero-mcp
 
 A remote [Model Context Protocol](https://modelcontextprotocol.io) server for Zotero, built for
 people who sync **metadata through a Zotero account and files through their own WebDAV server**.
@@ -31,7 +31,7 @@ Desktop, Cursor, anything that speaks MCP — can read and write the same librar
 ## Deploy
 
 ```bash
-git clone https://github.com/yousiki/zotero-mcp && cd zotero-mcp
+git clone https://github.com/yousiki/cloudflare-zotero-mcp && cd cloudflare-zotero-mcp
 bun install
 
 # 1. Semantic search — the one resource wrangler cannot auto-provision

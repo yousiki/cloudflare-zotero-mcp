@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Report privately through GitHub's
-[security advisory form](https://github.com/yousiki/zotero-mcp/security/advisories/new)
+[security advisory form](https://github.com/yousiki/cloudflare-zotero-mcp/security/advisories/new)
 rather than in a public issue. I aim to acknowledge within a week.
 
 Include what an attacker gains, the version or commit you tested, and enough detail to
