@@ -40,6 +40,10 @@ confirming the item, the file and the filename all landed. `scripts/e2e.ts --wri
 full create → upload → read → rename → delete cycle, but against your real library — expect it
 to leave traces if it fails partway.
 
+**Dependency upgrades are manual.** Run `bun update` and commit `bun.lock` in the same commit
+as `package.json` — CI installs with `--frozen-lockfile`, so a bump without its lockfile fails
+before any test runs. Dependabot only opens security PRs here, for the same reason.
+
 **Commits** follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`), matching
 the existing history.
 

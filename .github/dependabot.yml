@@ -1,23 +1,22 @@
 version: 2
 updates:
-  # Bun's lockfile is read through the npm ecosystem.
+  # Version updates are OFF for npm. Dependabot bumps package.json without
+  # regenerating bun.lock, and CI runs `bun install --frozen-lockfile`, so every
+  # such PR fails before it reaches a single test. A limit of 0 disables the
+  # version-update PRs while leaving Dependabot security updates free to open
+  # their own — those are worth the manual lockfile fix, routine bumps are not.
+  #
+  # Routine upgrades are manual: `bun update`, then commit bun.lock alongside
+  # package.json in one commit.
   - package-ecosystem: npm
     directory: /
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      # wrangler and the workers types move together and release often; one PR
-      # a week rather than three.
-      cloudflare:
-        patterns:
-          - wrangler
-          - '@cloudflare/*'
-      dev-dependencies:
-        dependency-type: development
     commit-message:
       prefix: chore
 
+  # Actions have no lockfile, so these land cleanly. Left on.
   - package-ecosystem: github-actions
     directory: /
     schedule:
