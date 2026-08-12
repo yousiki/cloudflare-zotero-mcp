@@ -170,8 +170,15 @@ search locally. Add `"remote": true` to the Vectorize binding to test against th
 The decisive check for anything touching files is still Zotero Desktop: sync it and confirm the
 item, the file and the filename all landed.
 
-See [AGENTS.md](AGENTS.md) for the architecture and how to add a tool.
+See [AGENTS.md](AGENTS.md) for the architecture and how to add a tool, and
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
+## Security
+
+`AUTH_PASSWORD` is the only thing between the public internet and full read/write access to
+your library, so make it long and random. [SECURITY.md](SECURITY.md) covers the trust model,
+how to report a vulnerability, and the limits of the login throttling.
 
 ## License
 
-MIT
+[MIT](LICENSE) © yousiki (Siqi Yang)

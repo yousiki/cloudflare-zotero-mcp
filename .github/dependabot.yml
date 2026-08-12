@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Bun's lockfile is read through the npm ecosystem.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # wrangler and the workers types move together and release often; one PR
+      # a week rather than three.
+      cloudflare:
+        patterns:
+          - wrangler
+          - '@cloudflare/*'
+      dev-dependencies:
+        dependency-type: development
+    commit-message:
+      prefix: chore
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore
