@@ -4,7 +4,7 @@ import { assertWritable, type ZoteroMcpContext } from '../context.js';
 import { yearOf } from '../core/format/items.js';
 import { normalizeDoi } from '../core/sources/identifiers.js';
 import type { ZoteroItem } from '../core/zotero/types.js';
-import { syncVectorIndex } from '../jobs/vectorize-sync.js';
+import { syncSemanticIndex } from '../jobs/index-sync.js';
 import { objectKey, textResult } from './common.js';
 
 /** Child types that follow an item when duplicates are merged. */
@@ -16,32 +16,42 @@ export function registerMaintenanceTools(server: McpServer, context: ZoteroMcpCo
     {
       title: 'Rebuild the semantic search index',
       description:
-        'Bring the Vectorize index in step with the library. Runs incrementally from the stored cursor; pass full=true to re-embed everything. A scheduled job does this every six hours, so this is for the first run or after a reset.',
+        'Bring the AI Search index in step with the library. Runs incrementally from the stored cursor; pass full=true to re-submit everything. A scheduled job does this every six hours, so this is for the first run or after a reset. Documents are indexed asynchronously: complete=true means every change was submitted, and backlog is what is still being processed.',
       inputSchema: z.object({
         full: z
           .boolean()
           .default(false)
-          .describe('Ignore the cursor and re-embed the whole library.'),
+          .describe('Ignore the cursor and re-submit the whole library.'),
         limit: z
           .number()
           .int()
           .min(1)
           .max(2000)
           .optional()
-          .describe('Cap on items embedded in this call. Anything left over is queued.'),
+          .describe('Cap on items submitted in this call. Anything left over is queued.'),
       }),
       outputSchema: z.object({
-        indexed: z.number(),
+        submitted: z.number().describe('Documents accepted by AI Search in this run.'),
         removed: z.number(),
-        remaining: z.number(),
-        complete: z.boolean(),
+        remaining: z.number().describe('Changed items left for the next run.'),
+        backlog: z
+          .number()
+          .nullable()
+          .describe(
+            'Documents accepted but not yet searchable. Null when AI Search could not be asked — not the same as zero.',
+          ),
+        failed: z
+          .number()
+          .nullable()
+          .describe('Documents AI Search could not index. Null when unknown.'),
+        complete: z.boolean().describe('Every change submitted — not the same as indexed.'),
         message: z.string(),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async ({ full, limit }) => {
       assertWritable(context);
-      const report = await syncVectorIndex({
+      const report = await syncSemanticIndex({
         zotero: context.zotero,
         index: context.semantic,
         store: context.store,
@@ -51,17 +61,23 @@ export function registerMaintenanceTools(server: McpServer, context: ZoteroMcpCo
       return textResult(
         [
           report.message,
-          `- embedded: ${report.indexed}`,
+          `- submitted: ${report.submitted}`,
           `- removed: ${report.removed}`,
-          `- still queued: ${report.remaining}`,
+          `- still queued locally: ${report.remaining}`,
+          `- indexing backlog: ${report.backlog ?? 'unknown'}`,
+          report.failed === null || report.failed > 0
+            ? `- failed to index: ${report.failed ?? 'unknown'}`
+            : '',
           report.complete ? '' : '- call again to continue',
         ]
           .filter(Boolean)
           .join('\n'),
         {
-          indexed: report.indexed,
+          submitted: report.submitted,
           removed: report.removed,
           remaining: report.remaining,
+          backlog: report.backlog,
+          failed: report.failed,
           complete: report.complete,
           message: report.message,
         },

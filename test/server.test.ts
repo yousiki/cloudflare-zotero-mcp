@@ -75,12 +75,14 @@ interface StubSemanticIndex extends SemanticIndex {
 function stubSemantic(matches: Array<{ itemKey: string; score: number }>): StubSemanticIndex {
   const calls: SemanticQueryOptions[] = [];
   return {
+    id: 'test-index',
     calls,
     query: async (_text, options = {}) => {
       calls.push(options);
       return matches;
     },
-    size: async () => matches.length,
+    stats: async () => ({ vectors: matches.length, queued: 0, running: 0, failed: 0 }),
+    ensure: async () => ({ created: false }),
     upsertItems: async () => 0,
     removeItems: async () => undefined,
   };
@@ -334,8 +336,9 @@ describe('semantic relevance', () => {
   }
 
   test('returns weak matches rather than hiding them, and says which are weak', async () => {
-    // Vectorize returns the nearest topK however far away they are, so a query
-    // the library does not cover comes back looking like any other result set.
+    // Nearest-neighbour search returns its closest documents however far away
+    // they are, so a query the library does not cover comes back looking like
+    // any other result set.
     // Filtering would trade visible noise for invisible loss; flagging does not.
     const { structured, text } = await search(
       [
@@ -412,8 +415,8 @@ describe('semantic filters', () => {
   }
 
   test('sends the same server-side filters keyword search sends', async () => {
-    // Vectorize can only pre-filter fields with a metadata index, so these ride
-    // along on the lookup that fetches the matched items' details.
+    // AI Search can only pre-filter the metadata fields declared on the instance,
+    // so these ride along on the lookup that fetches the matched items' details.
     const { itemsQuery } = await search([{ itemKey: 'AAAA1111', score: 0.8 }], {
       tags: ['transformers'],
       itemType: '-book',
@@ -425,6 +428,16 @@ describe('semantic filters', () => {
     expect(query.getAll('tag')).toEqual(['transformers']);
     expect(query.getAll('itemType')).toEqual(['-book']);
     expect(query.get('since')).toBe('40');
+  });
+
+  test('asks for distance only in semantic mode, and hybrid in auto', async () => {
+    const { index } = await search([{ itemKey: 'AAAA1111', score: 0.8 }], {});
+    // A caller that asked for similarity must not be handed an unscored keyword
+    // hit, which hybrid retrieval can produce.
+    expect(index.calls[0]?.retrieval).toBe('vector');
+
+    const auto = await search([{ itemKey: 'AAAA1111', score: 0.8 }], { mode: 'auto' });
+    expect(auto.index.calls[0]?.retrieval).toBe('hybrid');
   });
 
   test('drops matches outside the requested collection', async () => {

@@ -258,7 +258,7 @@ async function healthPage(env: Env): Promise<Response> {
     zoteroApiKey: Boolean(env.ZOTERO_API_KEY),
     webdav: Boolean(env.WEBDAV_URL && env.WEBDAV_USERNAME && env.WEBDAV_PASSWORD),
     authPassword: Boolean(env.AUTH_PASSWORD),
-    vectorize: Boolean(env.VECTORIZE && env.AI),
+    aiSearch: Boolean(env.AI_SEARCH),
   };
   const ok = checks.zoteroApiKey && checks.authPassword;
   return Response.json(

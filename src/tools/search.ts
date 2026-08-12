@@ -11,16 +11,28 @@ import { dedupeItems, itemSummarySchema, objectKey, textResult } from './common.
  * and `-attachment || -note` is rejected outright ("Invalid itemType '-note'"),
  * so attachments — the noisy ones, since `qmode=everything` matches their
  * indexed full text — are all we can exclude by default.
+ *
+ * Note what that costs. A full-text hit *is* the attachment as far as Zotero is
+ * concerned, so excluding attachments discards it rather than resolving it to the
+ * paper it belongs to. A phrase that appears only inside a PDF therefore returns
+ * nothing here, even though `itemType: 'attachment'` finds it. Promoting those
+ * hits through `data.parentItem` would be the fix; nothing does that today.
  */
 const DEFAULT_ITEM_TYPE_FILTER = '-attachment';
 
 /**
- * Vectorize is a nearest-neighbour search, not a filter: it returns the `topK`
- * closest vectors however far away they are, so a question the library simply
+ * Semantic retrieval is nearest-neighbour search, not a filter: it returns the
+ * closest documents however far away they are, so a question the library simply
  * does not cover comes back as a full page of confident-looking results. Nothing
  * is dropped — a floor tuned wrong would hide real hits, and silently — but
  * every semantic hit reports its score and anything under the floor is counted
  * in `belowThreshold`, which is the difference between recall and relevance.
+ *
+ * The score judged here is the cosine half of the match, never the fused
+ * hybrid score: AI Search combines BM25 rank with vector distance, and the
+ * result is not on the scale these bands were measured on. A document that
+ * matched on keywords alone reports no score at all, exactly like a keyword hit
+ * from Zotero.
  *
  * Measured on a ~1000-item ML library with `@cf/baai/bge-m3`:
  *
@@ -37,6 +49,10 @@ const DEFAULT_ITEM_TYPE_FILTER = '-attachment';
  * page without flagging genuine hits, while 0.55 would also flag on-topic papers
  * and teach the reader to ignore the warning. Hence a reported score rather than
  * a filter — a flat, uniformly low spread says more than any one value does.
+ *
+ * The bands were measured against a single vector per item. AI Search chunks a
+ * document, so a long abstract now matches on its closest passage instead of its
+ * average, which moves scores up rather than down; the floor stays advisory.
  */
 const DEFAULT_MIN_SCORE = 0.5;
 
@@ -54,7 +70,9 @@ const searchInput = z.object({
   qmode: z
     .enum(['titleCreatorYear', 'everything'])
     .optional()
-    .describe('Keyword scope. "everything" also searches abstracts and indexed full text.'),
+    .describe(
+      'Keyword scope. "everything" also searches abstracts. It also matches PDF full text, but such hits are attachments and attachments are excluded by default, so pass itemType:"attachment" to search inside PDFs.',
+    ),
   tags: z
     .array(z.string())
     .optional()
@@ -159,11 +177,18 @@ export function registerSearchTools(server: McpServer, context: ZoteroMcpContext
         return respond(mode, await keywordSearch(context.zotero, input), notes);
       }
 
-      const semantic = await semanticSearch(context, input, notes);
+      const semantic = await semanticSearch(context, input, notes, mode);
       const scoring = { minScore: input.minScore, scores: semantic.scores };
       if (mode === 'semantic') return respond(mode, semantic.items, notes, scoring);
 
-      // auto: semantic recall first, then keyword precision, deduplicated.
+      // auto: concatenate, dedupe, truncate — not a fusion. `semantic.items` is
+      // already capped at `limit`, so a keyword-only hit survives this only when
+      // the semantic leg under-filled. Whenever it did not, the request below is
+      // spent for nothing. That drains both of the leg's supposed benefits: the
+      // fresh item Zotero can see and AI Search cannot gets truncated away, and
+      // `sort` orders a half that does not survive. It does not buy PDF full text
+      // either — Zotero answers such a hit with the attachment, and
+      // DEFAULT_ITEM_TYPE_FILTER drops it. All measured, not assumed.
       const keywordItems = await keywordSearch(context.zotero, input);
       return respond(
         'auto',
@@ -244,10 +269,10 @@ function serverFilters(input: SearchInput): QueryParams {
 
 /**
  * Zotero has no year filter, so the bounds are applied here, on the same
- * first-four-digit parse `embeddingMetadata` uses — otherwise the Vectorize
- * pre-filter and this one would disagree about the same item. An unparsable
- * date is excluded rather than kept: Vectorize stores `year: 0` for it, so
- * keeping it here would make the two paths differ on exactly those items.
+ * first-four-digit parse `documentMetadata` uses — otherwise the pushed-down
+ * filter and this one would disagree about the same item. An unparsable date is
+ * excluded rather than kept: the index stores `year: 0` for it, so keeping it
+ * here would make the two paths differ on exactly those items.
  */
 function withinYears(item: ZoteroItem, input: SearchInput): boolean {
   if (!input.fromYear && !input.toYear) return true;
@@ -299,6 +324,7 @@ async function semanticSearch(
   context: ZoteroMcpContext,
   input: SearchInput,
   notes: string[],
+  mode: 'semantic' | 'auto',
 ): Promise<{ items: ZoteroItem[]; scores: Map<string, number> }> {
   const empty = { items: [], scores: new Map<string, number>() };
   if (!context.semantic || !input.query) return empty;
@@ -308,27 +334,42 @@ async function semanticSearch(
     // Everything except `itemType` and `year` is enforced after the search, so
     // ask for more candidates than the caller wants when a filter is in play.
     topK: narrowed ? input.limit * FILTER_OVERSHOOT : input.limit,
+    // `semantic` means ranked by similarity, so it stays on distance alone:
+    // hybrid could hand back a pure keyword hit with no score, in the one mode
+    // whose whole contract is that its results are scored. `auto` is merged with
+    // a keyword search anyway, so there the keyword half is welcome.
+    retrieval: mode === 'semantic' ? 'vector' : 'hybrid',
     itemType: input.itemType,
     fromYear: input.fromYear,
     toYear: input.toYear,
   });
 
   if (matches.length === 0) {
-    const size = await context.semantic.size().catch(() => 0);
-    if (size === 0) {
+    const indexed = await context.semantic
+      .stats()
+      .then((stats) => stats.vectors)
+      .catch(() => 0);
+    if (indexed === 0) {
       notes.push(
-        'The semantic index is empty. It fills on the scheduled sync, or immediately by calling zotero_reindex.',
+        // `zotero_reindex` on its own resumes from the stored cursor, and if that
+        // cursor already covers the library it reports "nothing changed" and does
+        // nothing at all. Naming `full` is the difference between advice that
+        // works and advice that only looks like it should.
+        'The semantic index is empty. It fills on the scheduled sync, or immediately by calling zotero_reindex — with full=true if a plain call reports that nothing changed.',
       );
     }
     return empty;
   }
 
-  const scores = new Map(matches.map((match) => [match.itemKey, match.score]));
+  const scores = new Map<string, number>();
+  for (const match of matches) {
+    // A document that matched on keywords alone has no distance to report.
+    if (match.score !== undefined) scores.set(match.itemKey, match.score);
+  }
   const keys = matches.map((match) => match.itemKey);
-  // Vectorize can only pre-filter fields that have a metadata index, and a
-  // metadata index has to exist before its vectors are written — so tags,
-  // `since` and negated item types are enforced here instead, by the lookup
-  // that fetches the item details anyway.
+  // AI Search can only push down the metadata fields declared on the instance,
+  // and it has no array type — so tags, `since` and negated item types are
+  // enforced here instead, by the lookup that fetches the item details anyway.
   const page = await context.zotero.getItems(
     { ...serverFilters(input), itemKey: keys.join(',') },
     keys.length,

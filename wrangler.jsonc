@@ -34,19 +34,25 @@
   // holds the extracted-text cache and the semantic sync cursor.
   "kv_namespaces": [{ "binding": "OAUTH_KV" }, { "binding": "CACHE_KV" }],
 
-  // Vectorize is not auto-provisioned; create it once:
-  //   wrangler vectorize create zotero-items --dimensions=1024 --metric=cosine
-  "vectorize": [{ "binding": "VECTORIZE", "index_name": "zotero-items" }],
+  // A namespace binding rather than a single instance: the instance itself is
+  // created on the first sync from the configuration in
+  // src/core/search/aisearch.ts, so hybrid retrieval, the embedding model and
+  // the reranker are declared in code rather than clicked into the dashboard.
+  // wrangler creates the namespace on deploy if it does not exist.
+  "ai_search_namespaces": [{ "binding": "AI_SEARCH", "namespace": "zotero-mcp" }],
 
-  "ai": { "binding": "AI" },
-
-  // Incremental embedding sync. Off-the-hour on purpose.
+  // Incremental index sync. Off-the-hour on purpose.
   "triggers": { "crons": ["17 */6 * * *"] },
 
   "vars": {
     "ZOTERO_LIBRARY_TYPE": "user",
+    "AI_SEARCH_INSTANCE": "zotero-items",
     "EMBEDDING_MODEL": "@cf/baai/bge-m3",
-    "SYNC_BATCH_LIMIT": "400"
+    "RERANKING_MODEL": "@cf/baai/bge-reranker-base",
+    // Rewriting spends an extra LLM call to rephrase a query that an MCP client
+    // already phrased deliberately. Set to "true" to enable it.
+    "AI_SEARCH_REWRITE_QUERY": "false",
+    "SYNC_BATCH_LIMIT": "100"
   }
 
   // Secrets (wrangler secret put <NAME>):

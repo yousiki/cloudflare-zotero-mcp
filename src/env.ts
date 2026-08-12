@@ -2,7 +2,11 @@ import type { OAuthHelpers } from '@cloudflare/workers-oauth-provider';
 import type { ZoteroMcpContext } from './context.js';
 import { AttachmentReader, type TextCache } from './core/attachment/read.js';
 import { AttachmentWriter } from './core/attachment/write.js';
-import { VectorizeSemanticIndex, WorkersAiEmbedder } from './core/search/semantic.js';
+import {
+  AiSearchSemanticIndex,
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_RERANKING_MODEL,
+} from './core/search/aisearch.js';
 import { WebDavClient } from './core/webdav/client.js';
 import { ZoteroClient } from './core/zotero/client.js';
 
@@ -10,8 +14,7 @@ export interface Env {
   // Bindings
   OAUTH_KV: KVNamespace;
   CACHE_KV: KVNamespace;
-  VECTORIZE?: Vectorize;
-  AI?: Ai;
+  AI_SEARCH?: AiSearchNamespace;
   OAUTH_PROVIDER: OAuthHelpers;
 
   // Secrets
@@ -27,6 +30,9 @@ export interface Env {
   AUTH_USERNAME?: string;
   CONTACT_EMAIL?: string;
   EMBEDDING_MODEL?: string;
+  RERANKING_MODEL?: string;
+  AI_SEARCH_INSTANCE?: string;
+  AI_SEARCH_REWRITE_QUERY?: string;
   SYNC_BATCH_LIMIT?: string;
 }
 
@@ -57,12 +63,14 @@ export function webdavClient(env: Env): WebDavClient | null {
   });
 }
 
-export function semanticIndex(env: Env): VectorizeSemanticIndex | null {
-  if (!env.VECTORIZE || !env.AI) return null;
-  return new VectorizeSemanticIndex(
-    env.VECTORIZE,
-    new WorkersAiEmbedder(env.AI, env.EMBEDDING_MODEL || '@cf/baai/bge-m3'),
-  );
+export function semanticIndex(env: Env): AiSearchSemanticIndex | null {
+  if (!env.AI_SEARCH) return null;
+  return new AiSearchSemanticIndex(env.AI_SEARCH, {
+    instance: env.AI_SEARCH_INSTANCE || 'zotero-items',
+    embeddingModel: env.EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL,
+    rerankingModel: env.RERANKING_MODEL || DEFAULT_RERANKING_MODEL,
+    rewriteQuery: env.AI_SEARCH_REWRITE_QUERY === 'true',
+  });
 }
 
 /** KV-backed cache for extracted PDF text, keyed by attachment key + md5. */
@@ -89,9 +97,10 @@ export function buildContext(env: Env, scopes: string[]): ZoteroMcpContext {
     contactEmail: env.CONTACT_EMAIL,
   };
 }
-
-/** How many items one sync run may embed before deferring the rest. */
+/** How many items one sync run may submit before deferring the rest. */
 export function syncBatchLimit(env: Env): number {
   const configured = Number(env.SYNC_BATCH_LIMIT);
-  return Number.isFinite(configured) && configured > 0 ? configured : 400;
+  // Matches DEFAULT_BATCH in jobs/index-sync.ts: one upload per item, and every
+  // upload is a subrequest.
+  return Number.isFinite(configured) && configured > 0 ? configured : 100;
 }
