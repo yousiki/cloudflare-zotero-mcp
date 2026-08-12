@@ -1,0 +1,13 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit the real file.
+ZOTERO_API_KEY=
+# Optional: auto-detected from the API key when left empty.
+ZOTERO_LIBRARY_ID=
+ZOTERO_LIBRARY_TYPE=user
+
+# WebDAV root as configured in Zotero (the "/zotero" suffix is appended automatically).
+WEBDAV_URL=
+WEBDAV_USERNAME=
+WEBDAV_PASSWORD=
+
+# Password for the OAuth login page at /authorize.
+AUTH_PASSWORD=

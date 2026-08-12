@@ -1,0 +1,59 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zotero-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+
+  // nodejs_compat            -> unpdf / pdfjs-serverless need a few node shims
+  // global_fetch_strictly_public -> required by workers-oauth-provider for CIMD
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+
+  "observability": { "enabled": true },
+
+  // The OAuth issuer and the RFC 8707 resource identifier are both derived from
+  // the request hostname, so the server must have exactly one public origin.
+  // Tokens minted against a different origin fail the audience check, which is
+  // why workers.dev and preview URLs are off.
+  //
+  // wrangler does not expand environment variables inside this file, so the
+  // hostname is not baked in here; `bun run deploy` reads it from the
+  // ZOTERO_MCP_DOMAIN environment variable and passes it as --domain:
+  //   ZOTERO_MCP_DOMAIN=zotero-mcp.example.com bun run deploy
+  //
+  // To serve from the workers.dev origin instead of a custom domain, set
+  // "workers_dev": true and deploy with plain `bun x wrangler deploy`. Enable
+  // exactly one of the two — with both, half your tokens fail the audience check.
+  "workers_dev": false,
+  "preview_urls": false,
+
+  // PDF text extraction is CPU bound; the default 30s is plenty but be explicit.
+  "limits": { "cpu_ms": 30000 },
+
+  // No ids: wrangler provisions these on first `dev`/`deploy` and writes the
+  // ids back here. OAUTH_KV holds OAuth clients, grants and tokens; CACHE_KV
+  // holds the extracted-text cache and the semantic sync cursor.
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }, { "binding": "CACHE_KV" }],
+
+  // Vectorize is not auto-provisioned; create it once:
+  //   wrangler vectorize create zotero-items --dimensions=1024 --metric=cosine
+  "vectorize": [{ "binding": "VECTORIZE", "index_name": "zotero-items" }],
+
+  "ai": { "binding": "AI" },
+
+  // Incremental embedding sync. Off-the-hour on purpose.
+  "triggers": { "crons": ["17 */6 * * *"] },
+
+  "vars": {
+    "ZOTERO_LIBRARY_TYPE": "user",
+    "EMBEDDING_MODEL": "@cf/baai/bge-m3",
+    "SYNC_BATCH_LIMIT": "400"
+  }
+
+  // Secrets (wrangler secret put <NAME>):
+  //   ZOTERO_API_KEY     - https://www.zotero.org/settings/keys
+  //   ZOTERO_LIBRARY_ID  - optional, auto-detected from the API key when unset
+  //   WEBDAV_URL         - e.g. https://dav.example.com/remote.php/dav/files/me
+  //   WEBDAV_USERNAME
+  //   WEBDAV_PASSWORD
+  //   AUTH_PASSWORD      - password for the /authorize login page
+}
