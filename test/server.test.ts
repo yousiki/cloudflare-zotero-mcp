@@ -67,6 +67,23 @@ const ITEM_IN_COLLECTION = {
   data: { ...ITEM.data, key: 'DDDD4444', date: '1998', collections: ['COLL0001'] },
 };
 
+/**
+ * Carries a Better BibTeX key in Extra — the only field Zotero keeps one in, and
+ * one no `q` can reach.
+ */
+const ITEM_WITH_CITATION_KEY = {
+  ...ITEM,
+  key: 'EEEE5555',
+  meta: {},
+  data: {
+    ...ITEM.data,
+    key: 'EEEE5555',
+    title: 'Mamba: Linear-Time Sequence Modeling with Selective State Spaces',
+    date: '2023',
+    extra: 'Citation Key: gu2023mamba\narXiv:2312.00752',
+  },
+};
+
 interface StubSemanticIndex extends SemanticIndex {
   /** Options every `query` call received, for asserting what was pushed down. */
   calls: SemanticQueryOptions[];
@@ -98,6 +115,10 @@ function testContext(
     route('GET', '/users/1/items/AAAA1111', () => jsonResponse(ITEM)),
     route('GET', '/users/1/items/CCCC3333/children', () => jsonResponse([])),
     route('GET', '/users/1/items/CCCC3333', () => jsonResponse(ITEM_WITHOUT_FILE)),
+    // Must precede the bare `/items` route: `route` matches by prefix.
+    route('GET', '/users/1/items/top', () =>
+      jsonResponse([ITEM, ITEM_WITH_CITATION_KEY], { version: 12 }),
+    ),
     route('GET', '/users/1/items', (request) => {
       // Semantic search resolves its matches by key; keyword search does not.
       const wanted = new URL(request.url).searchParams.get('itemKey');
@@ -153,6 +174,14 @@ function lastItemsQuery(context: ZoteroMcpContext): URLSearchParams {
   const requests = requestLog.get(context)?.requests ?? [];
   const last = [...requests].reverse().find((request) => request.url.includes('/items?'));
   if (!last) throw new Error('no /items request was made');
+  return new URL(last.url).searchParams;
+}
+
+/** The `/items/top` request a citation-key scan makes, which `lastItemsQuery` skips. */
+function lastTopItemsQuery(context: ZoteroMcpContext): URLSearchParams {
+  const requests = requestLog.get(context)?.requests ?? [];
+  const last = [...requests].reverse().find((request) => request.url.includes('/items/top?'));
+  if (!last) throw new Error('no /items/top request was made');
   return new URL(last.url).searchParams;
 }
 
@@ -272,6 +301,47 @@ describe('MCP surface', () => {
       arguments: { query: 'rlhf', itemType: 'note' },
     });
     expect(lastItemsQuery(context).getAll('itemType')).toEqual(['note']);
+  });
+
+  test('citationKey finds the item whose Extra carries the key', async () => {
+    const context = testContext();
+    const scoped = await connect(context);
+
+    const result = await scoped.callTool({
+      name: 'zotero_search',
+      arguments: { citationKey: 'gu2023mamba' },
+    });
+
+    const structured = result.structuredContent as { items: Array<{ key: string }> };
+    expect(structured.items.map((item) => item.key)).toEqual(['EEEE5555']);
+
+    // Zotero cannot search Extra, so a `q` would narrow away the very match this
+    // is looking for. The other filters still have to push down.
+    const query = lastTopItemsQuery(context);
+    expect(query.get('q')).toBeNull();
+    expect(query.get('qmode')).toBeNull();
+    expect(query.getAll('itemType')).toEqual(['-attachment']);
+  });
+
+  test('citationKey returns nothing rather than unrelated items when the key is absent', async () => {
+    const result = await client.callTool({
+      name: 'zotero_search',
+      arguments: { citationKey: 'nobody1999nothing' },
+    });
+
+    const structured = result.structuredContent as { items: unknown[]; total: number };
+    expect(structured.total).toBe(0);
+    expect(structured.items).toEqual([]);
+  });
+
+  test('citationKey matches a whole key, not a prefix of one', async () => {
+    // `gu2023` is a different paper from `gu2023mamba`, so a substring hit is wrong.
+    const result = await client.callTool({
+      name: 'zotero_search',
+      arguments: { citationKey: 'gu2023' },
+    });
+
+    expect((result.structuredContent as { total: number }).total).toBe(0);
   });
 
   test('get_item renders detail with children', async () => {
