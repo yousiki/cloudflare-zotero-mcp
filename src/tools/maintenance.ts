@@ -42,6 +42,12 @@ export function registerMaintenanceTools(server: McpServer, context: ZoteroMcpCo
           ),
         failed: z.number().nullable().describe('Items the index rejected. Null when unknown.'),
         complete: z.boolean().describe('Every change submitted — not the same as indexed.'),
+        warning: z
+          .string()
+          .nullable()
+          .describe(
+            'A configuration problem this run could not fix, or null. A sync can finish cleanly and still be writing into a misconfigured index.',
+          ),
         message: z.string(),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
@@ -66,6 +72,7 @@ export function registerMaintenanceTools(server: McpServer, context: ZoteroMcpCo
             ? `- failed to index: ${report.failed ?? 'unknown'}`
             : '',
           report.complete ? '' : '- call again to continue',
+          report.warning ? `\n> ${report.warning}` : '',
         ]
           .filter(Boolean)
           .join('\n'),
@@ -76,6 +83,7 @@ export function registerMaintenanceTools(server: McpServer, context: ZoteroMcpCo
           backlog: report.backlog,
           failed: report.failed,
           complete: report.complete,
+          warning: report.warning,
           message: report.message,
         },
       );

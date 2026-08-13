@@ -42,8 +42,12 @@ export interface SemanticIndex {
    * Creates the backing index if it does not exist yet. `created` is true only
    * when this call made it: an index that has just come into existence is empty,
    * whatever a stored cursor claims.
+   *
+   * `mismatch` describes an existing index whose configuration this build cannot
+   * apply — reconfiguring re-indexes the library, so it is reported rather than
+   * corrected. Present only when the difference degrades results.
    */
-  ensure(): Promise<{ created: boolean }>;
+  ensure(): Promise<{ created: boolean; mismatch?: string }>;
   /**
    * Submits items for indexing, skipping the ones that are not indexable.
    * Returns how many were accepted — indexing itself completes afterwards.

@@ -32,12 +32,43 @@ export const DEFAULT_EMBEDDING_MODEL = '@cf/baai/bge-m3';
 export const DEFAULT_RERANKING_MODEL = '@cf/baai/bge-reranker-base';
 
 /**
- * `max_num_results` counts chunks, not items, and one item's document can be
- * split into several. Asking for this multiple of the wanted item count keeps a
- * page of results from collapsing to a handful once chunks are folded back into
- * items.
+ * Tokens per chunk. Not a tuning guess: 512 is the input ceiling of
+ * `@cf/baai/bge-m3` on Workers AI, so it is the largest chunk the embedding
+ * model can read without truncating, and AI Search's own default of 256 splits
+ * a document that would otherwise fit whole.
+ *
+ * Measured on real items from this library, `documentText` produces 316-426
+ * tokens (1615-2164 characters): two chunks at the default, one at 512. That is
+ * what makes `CHUNKS_PER_ITEM` viable at 1, and it puts the score bands in
+ * `zotero_semantic_search` back on the one-vector-per-item footing they were
+ * measured on.
+ *
+ * Changing this re-indexes the library, and `ensure()` deliberately will not
+ * apply it to an instance that already exists — see `chunkSizeMismatch`.
  */
-const CHUNKS_PER_ITEM = 2;
+const CHUNK_SIZE = 512;
+
+/**
+ * Percent of tokens shared between adjacent chunks. Pinned to AI Search's own
+ * default rather than left implicit, because this file is where the instance is
+ * configured and an upstream change of default should not move it silently. It
+ * only bites for the long tail that still exceeds `CHUNK_SIZE`; the typical item
+ * is a single chunk with no neighbour to overlap.
+ */
+const CHUNK_OVERLAP = 10;
+
+/**
+ * `max_num_results` counts chunks, not items. At `CHUNK_SIZE` an item's document
+ * is normally one chunk, so one chunk buys one item and no overshoot is needed.
+ *
+ * "Normally" is not "always": `documentText` caps at 6000 characters, roughly
+ * 1200 tokens, so an item with a very long abstract still splits in two or
+ * three. Those spend more than one result slot, and a page can come back a few
+ * items short of what was asked for — which is why the fold in `query` stays,
+ * and why this is the constant to raise if that tail ever matters more than the
+ * item ceiling does.
+ */
+const CHUNKS_PER_ITEM = 1;
 
 /** `max_num_results` is rejected above 50. */
 const MAX_CHUNKS = 50;
@@ -85,10 +116,11 @@ export class AiSearchSemanticIndex implements SemanticIndex {
    * deleting the instance while the cursor sits at the newest library version
    * leaves an empty index that no incremental run ever refills.
    */
-  async ensure(): Promise<{ created: boolean }> {
+  async ensure(): Promise<{ created: boolean; mismatch?: string }> {
     try {
-      await this.instance.info();
-      return { created: false };
+      const info = await this.instance.info();
+      const mismatch = chunkSizeMismatch(this.settings.instance, info);
+      return mismatch ? { created: false, mismatch } : { created: false };
     } catch (error) {
       if (!isNotFound(error)) throw error;
     }
@@ -103,6 +135,8 @@ export class AiSearchSemanticIndex implements SemanticIndex {
       reranking: true,
       reranking_model: this.settings.rerankingModel,
       chunk: true,
+      chunk_size: CHUNK_SIZE,
+      chunk_overlap: CHUNK_OVERLAP,
       // Nothing is dropped for being far away; see `match_threshold` in `query`.
       score_threshold: 0,
       // Five fields is the cap and there is no array type, so only what can
@@ -116,7 +150,10 @@ export class AiSearchSemanticIndex implements SemanticIndex {
   }
 
   async query(text: string, options: SemanticQueryOptions = {}): Promise<SemanticMatch[]> {
-    const wanted = Math.min(options.topK ?? 10, MAX_CHUNKS);
+    // Clamped against the item ceiling, not the chunk one: `topK` counts items,
+    // and callers overshoot it deliberately to survive their own downstream
+    // filters, so the number arriving here can exceed what a page can hold.
+    const wanted = Math.min(options.topK ?? 10, MAX_SEMANTIC_ITEMS);
     const filters: Record<string, unknown> = {};
     // A negated type is a Zotero spelling that has no equivalent here, and it is
     // enforced by the item lookup instead.
@@ -141,11 +178,27 @@ export class AiSearchSemanticIndex implements SemanticIndex {
           // cost is that a BM25-only chunk has no `vector_score`; the tool reports
           // those as unscored rather than inventing a number on the wrong scale.
           retrieval_type: 'hybrid',
+          // 'or', not the 'and' default. `and` requires every query term to
+          // appear in the same chunk, and this tool asks its callers for "a
+          // question or description" against documents that are ~400-token
+          // metadata cards — so the default empties the BM25 half on exactly the
+          // phrasing the tool invites, leaving hybrid retrieval to behave like
+          // the vector-only search it was chosen over. A Chinese query never
+          // satisfies `and` at all, since the keyword index is Porter-stemmed.
+          // RRF still ranks a chunk that matched several terms above one that
+          // matched a single term, so recall is widened without flattening order.
+          keyword_match_mode: 'or',
           max_num_results: Math.min(wanted * CHUNKS_PER_ITEM, MAX_CHUNKS),
           // 0, not the 0.4 default: this search reports how weak its matches are
           // rather than hiding them, so the floor lives in `zotero_semantic_search`
           // and nothing is discarded on the way here.
           match_threshold: 0,
+          // The default, `true`, turns a failed retrieval into an empty result
+          // set. `zotero_semantic_search` reads emptiness as a statement about
+          // the library — it checks whether the index is populated and tells the
+          // caller to run `zotero_reindex` — so a swallowed backend failure comes
+          // back as confident, wrong advice. Fail loudly and let it surface.
+          return_on_failure: false,
           ...(Object.keys(filters).length > 0
             ? { filters: filters as VectorizeVectorMetadataFilter }
             : {}),
@@ -264,4 +317,30 @@ export class AiSearchSemanticIndex implements SemanticIndex {
 
 function isNotFound(error: unknown): boolean {
   return error instanceof Error && /not.?found/i.test(`${error.name} ${error.message}`);
+}
+
+/**
+ * `create` is the only place `chunk_size` is set — reconfiguring an instance
+ * re-indexes the entire library, which `ensure()` will not do behind your back —
+ * so an instance built before `CHUNK_SIZE` was pinned still chunks at AI Search's
+ * 256-token default.
+ *
+ * That does not fail, which is the problem. Every document splits in two, each
+ * item spends two of the result slots `CHUNKS_PER_ITEM` budgets one for, and a
+ * search returns roughly half the items it was asked for while looking perfectly
+ * healthy. A silent halving is worth a sentence in the sync report.
+ *
+ * An instance whose `chunk_size` is larger is left alone: it holds fewer chunks
+ * per item, not more, so nothing is oversubscribed.
+ */
+function chunkSizeMismatch(
+  instance: string,
+  info: { chunk_size?: number } | undefined,
+): string | undefined {
+  const actual = info?.chunk_size;
+  // Absent rather than small: an older API that does not report the field says
+  // nothing about how the instance is configured, and guessing either way would
+  // put an invented warning in the report.
+  if (actual === undefined || actual >= CHUNK_SIZE) return undefined;
+  return `AI Search instance "${instance}" chunks at ${actual} tokens, but this deployment is built for ${CHUNK_SIZE}. Items split across more chunks than a search budgets result slots for, so zotero_semantic_search returns fewer items than it was asked for. Delete the instance and let the next sync rebuild it, or set chunk_size to ${CHUNK_SIZE} and re-sync — both re-index the whole library.`;
 }

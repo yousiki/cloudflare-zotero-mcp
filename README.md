@@ -72,11 +72,17 @@ provisioning fails with error 10014; add the existing `id`s to `wrangler.jsonc` 
 **Nothing is created by hand.** The `zotero-mcp` AI Search namespace is created by wrangler on
 deploy, and the instance named by `AI_SEARCH_INSTANCE` is created by the first sync from the
 configuration in `src/core/search/aisearch.ts`: hybrid retrieval with RRF fusion, the embedding
-model, the reranker, chunking, and the two custom metadata fields are declared in code rather than
-clicked into the dashboard. That code only ever *creates* an instance, never updates one, because
-changing `custom_metadata` or the embedding model re-indexes the whole library — which is not
-something a cron run should do behind your back. Changing either therefore means deleting the
-instance, so the next sync recreates it from the new configuration.
+model, the reranker, the 512-token chunking, and the two custom metadata fields are declared in code
+rather than clicked into the dashboard. That code only ever *creates* an instance, never updates one,
+because changing `custom_metadata`, the embedding model or the chunking re-indexes the whole library —
+which is not something a cron run should do behind your back. Changing any of them therefore means
+deleting the instance, so the next sync recreates it from the new configuration.
+
+Because of that, an instance created by an older version of this worker keeps its old chunking, and a
+smaller `chunk_size` splits each item across more chunks than a query budgets result slots for — so
+searches come back short without anything looking broken. Every sync compares the two and reports the
+difference: `zotero_reindex` returns it as `warning` and the scheduled run logs it. If you see it,
+delete the instance and let the next sync rebuild it.
 
 `ZOTERO_LIBRARY_ID` is optional — the server asks Zotero which library the key belongs to. Set it
 (plus `ZOTERO_LIBRARY_TYPE=group`) only for a group library. Note that **Zotero does not support
@@ -202,10 +208,15 @@ migration nor the split into two tools.
 
 Semantic retrieval is hybrid, not vector-only: AI Search searches with BM25 and vectors over the same
 documents, fuses the two rankings with RRF, and reranks with `@cf/baai/bge-reranker-base`. Documents
-are chunked, so a long abstract matches on its closest passage rather than on its average. Hybrid
-because a caller reaches for this tool *instead of* `zotero_search`, never alongside it — choosing
-between them is a guess, so this one has to carry lexical precision of its own. An exact name like
-"Sparse VideoGen2" is something a lexical index matches directly and vector distance only approximates.
+are chunked at 512 tokens — the input ceiling of `@cf/baai/bge-m3` on Workers AI, and enough that a
+measured item's document is a single chunk, so an item normally costs one result slot rather than two.
+Hybrid because a caller reaches for this tool *instead of* `zotero_search`, never alongside it —
+choosing between them is a guess, so this one has to carry lexical precision of its own. An exact name
+like "Sparse VideoGen2" is something a lexical index matches directly and vector distance only
+approximates. That half is why `keyword_match_mode` is `or` rather than the service default of `and`:
+requiring every term of a natural-language question to appear in one chunk would empty the BM25 side
+on exactly the phrasing this tool asks for, and would never match a Chinese query at all, since the
+keyword index is Porter-stemmed.
 
 The price of that is rows without a score. The reported `score` is the cosine half of the match
 (`scoring_details.vector_score`), never the fused score: the bands below were measured on cosine, and
@@ -248,9 +259,10 @@ same for its year bounds, the only filter it applies locally. Matches the semant
 the way — filtered out, or gone from Zotero since the index was written — are counted in its `note`.
 
 The two tools also differ in what they will accept. `zotero_search` takes `limit` up to 100;
-`zotero_semantic_search` stops at 25, because AI Search caps a query at 50 chunks and the tool asks
-for two chunks per wanted item — beyond 25 the overshoot no longer fits, and a larger `limit` would
-quietly return fewer results than asked for rather than failing. `includeTrashed` exists only on
+`zotero_semantic_search` stops at 50, because that is where AI Search caps a query and an item's
+document is normally one chunk. "Normally" is not "always": `documentText` caps at 6000 characters,
+roughly 1200 tokens, so an item with a very long abstract still splits in two or three and spends more
+than one slot — a page can come back a few items short of what was asked for. `includeTrashed` exists only on
 `zotero_search`: the index holds no trashed items, so the flag could not change a semantic result.
 For the same reason `itemType` cannot reach attachments, notes or annotations there — those are never
 indexed, whatever you pass.

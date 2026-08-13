@@ -55,7 +55,13 @@ export default {
         store: textCache(env),
         limit: syncBatchLimit(env),
       })
-        .then((report) => console.log('ai search sync:', report.message))
+        .then((report) => {
+          console.log('ai search sync:', report.message);
+          // The scheduled run is the only one nobody is watching, so a
+          // misconfigured index would otherwise go unmentioned until a search
+          // came back short.
+          if (report.warning) console.warn('ai search sync:', report.warning);
+        })
         .catch((error) => console.error('ai search sync failed:', error)),
     );
   },

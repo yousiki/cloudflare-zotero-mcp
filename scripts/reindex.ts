@@ -35,6 +35,7 @@ interface Report {
   backlog: number | null;
   failed: number | null;
   complete: boolean;
+  warning: string | null;
   message: string;
 }
 
@@ -60,6 +61,9 @@ for (;;) {
   console.log(
     `round ${round}: +${report.submitted} submitted, ${report.removed} removed, ${report.remaining} queued locally, ${report.backlog ?? 'unknown'} indexing`,
   );
+  // Once, not per round: this is the script you run after rebuilding the
+  // instance, so it is where a chunk_size that did not take gets noticed.
+  if (round === 1 && report.warning) console.warn(`\n! ${report.warning}\n`);
 
   if (report.complete) break;
   if (round >= MAX_SUBMIT_ROUNDS) {
