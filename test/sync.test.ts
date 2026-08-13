@@ -162,7 +162,6 @@ function fakeIndex() {
     instance: 'zotero-items',
     embeddingModel: '@cf/baai/bge-m3',
     rerankingModel: '@cf/baai/bge-reranker-base',
-    rewriteQuery: false,
   });
   return { namespace, backend: namespace.instance, index };
 }
@@ -336,7 +335,7 @@ describe('AiSearchSemanticIndex', () => {
     expect(matches.map((match) => match.itemKey)).toEqual(['KEY00000', 'KEY00001', 'KEY00002']);
   });
 
-  test('reports no score for a chunk that matched on keywords alone', async () => {
+  test('omits score when the chunk carries no vector_score', async () => {
     const { backend, index } = fakeIndex();
     backend.chunks = [{ key: 'AAAA1111', score: 0.88 }];
 

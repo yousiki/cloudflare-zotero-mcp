@@ -49,9 +49,6 @@
     "AI_SEARCH_INSTANCE": "zotero-items",
     "EMBEDDING_MODEL": "@cf/baai/bge-m3",
     "RERANKING_MODEL": "@cf/baai/bge-reranker-base",
-    // Rewriting spends an extra LLM call to rephrase a query that an MCP client
-    // already phrased deliberately. Set to "true" to enable it.
-    "AI_SEARCH_REWRITE_QUERY": "false",
     "SYNC_BATCH_LIMIT": "100"
   }
 

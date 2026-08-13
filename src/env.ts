@@ -32,7 +32,6 @@ export interface Env {
   EMBEDDING_MODEL?: string;
   RERANKING_MODEL?: string;
   AI_SEARCH_INSTANCE?: string;
-  AI_SEARCH_REWRITE_QUERY?: string;
   SYNC_BATCH_LIMIT?: string;
 }
 
@@ -69,7 +68,6 @@ export function semanticIndex(env: Env): AiSearchSemanticIndex | null {
     instance: env.AI_SEARCH_INSTANCE || 'zotero-items',
     embeddingModel: env.EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL,
     rerankingModel: env.RERANKING_MODEL || DEFAULT_RERANKING_MODEL,
-    rewriteQuery: env.AI_SEARCH_REWRITE_QUERY === 'true',
   });
 }
 

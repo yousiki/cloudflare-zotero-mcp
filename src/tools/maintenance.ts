@@ -16,7 +16,7 @@ export function registerMaintenanceTools(server: McpServer, context: ZoteroMcpCo
     {
       title: 'Rebuild the semantic search index',
       description:
-        'Bring the AI Search index in step with the library. Runs incrementally from the stored cursor; pass full=true to re-submit everything. A scheduled job does this every six hours, so this is for the first run or after a reset. Documents are indexed asynchronously: complete=true means every change was submitted, and backlog is what is still being processed.',
+        'Bring the index behind zotero_semantic_search in step with the library. Runs incrementally; pass full=true to re-submit everything. A scheduled job does this every six hours, so this is for the first run or after a reset. Indexing is asynchronous: complete=true means every change was submitted, and backlog is what is still being processed.',
       inputSchema: z.object({
         full: z
           .boolean()
@@ -31,19 +31,16 @@ export function registerMaintenanceTools(server: McpServer, context: ZoteroMcpCo
           .describe('Cap on items submitted in this call. Anything left over is queued.'),
       }),
       outputSchema: z.object({
-        submitted: z.number().describe('Documents accepted by AI Search in this run.'),
+        submitted: z.number().describe('Items sent to the index in this run.'),
         removed: z.number(),
         remaining: z.number().describe('Changed items left for the next run.'),
         backlog: z
           .number()
           .nullable()
           .describe(
-            'Documents accepted but not yet searchable. Null when AI Search could not be asked — not the same as zero.',
+            'Items accepted but not yet searchable. Null means this could not be determined — not the same as zero.',
           ),
-        failed: z
-          .number()
-          .nullable()
-          .describe('Documents AI Search could not index. Null when unknown.'),
+        failed: z.number().nullable().describe('Items the index rejected. Null when unknown.'),
         complete: z.boolean().describe('Every change submitted — not the same as indexed.'),
         message: z.string(),
       }),

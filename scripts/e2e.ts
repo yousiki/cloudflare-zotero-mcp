@@ -53,7 +53,7 @@ function textOf(result: { content?: unknown }): string {
     .trim();
 }
 
-function assert(condition: unknown, message: string): void {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
@@ -74,6 +74,12 @@ await step('tools/list exposes the full catalogue', async () => {
     tools.some((tool) => tool.name === 'zotero_read_attachment'),
     'zotero_read_attachment is missing',
   );
+  for (const name of ['zotero_search', 'zotero_semantic_search']) {
+    assert(
+      tools.some((tool) => tool.name === name),
+      `${name} is missing`,
+    );
+  }
 });
 
 const someKey = await step('zotero_search finds something', async () => {
@@ -82,6 +88,56 @@ const someKey = await step('zotero_search finds something', async () => {
   const items = (result.structuredContent as { items?: Array<{ key: string }> })?.items ?? [];
   assert(items.length > 0, 'the library returned no items');
   return items[0]?.key;
+});
+
+await step('zotero_semantic_search ranks by meaning', async () => {
+  let failure: string | undefined;
+  const result = await client
+    .callTool({
+      name: 'zotero_semantic_search',
+      arguments: { query: 'machine learning', limit: 5 },
+    })
+    .catch((error: unknown) => {
+      failure = error instanceof Error ? error.message : String(error);
+      return undefined;
+    });
+  const refusal = failure ?? (result?.isError ? textOf(result) : undefined);
+  if (refusal !== undefined) {
+    // AI Search is an optional binding. Without it the tool refuses by design and
+    // names the fallback, which is a deployment shape rather than a failure.
+    assert(
+      refusal.includes('AI Search is not bound') && refusal.includes('zotero_search'),
+      refusal,
+    );
+    console.log('  note AI Search is unbound on this deployment; semantic search skipped');
+    return;
+  }
+  const body = result?.structuredContent as
+    | {
+        items: Array<{ key: string; score?: number }>;
+        minScore: number;
+        scored: number;
+        belowThreshold: number;
+        unscored: number;
+      }
+    | undefined;
+  assert(body !== undefined, 'the result carried no structured content');
+  const items = body.items ?? [];
+  assert(typeof body.minScore === 'number', 'minScore is missing from the result');
+  // Hybrid retrieval leaves some rows without a score, so the counts have to
+  // account for every item instead of every item carrying a number.
+  assert(
+    body.scored + body.unscored === items.length,
+    `scored (${body.scored}) + unscored (${body.unscored}) should cover ${items.length} item(s)`,
+  );
+  assert(
+    body.belowThreshold <= body.scored,
+    `belowThreshold (${body.belowThreshold}) should only count scored items (${body.scored})`,
+  );
+  assert(
+    items.every((item) => item.score === undefined || (item.score >= 0 && item.score <= 1)),
+    'a score fell outside 0-1',
+  );
 });
 
 await step('zotero_list_collections returns the tree', async () => {

@@ -3,9 +3,9 @@ import type { ZoteroItem } from '../zotero/types.js';
 export interface SemanticMatch {
   itemKey: string;
   /**
-   * Cosine similarity, when the backend reports one. Absent for a document that
-   * matched on keywords alone — the same reason a Zotero keyword hit has no
-   * score.
+   * Cosine similarity, when the backend reports one. Hybrid retrieval does not
+   * report a distance for every result, so this is absent rather than zero when
+   * none came back — zero would read as the worst match on the page.
    */
   score?: number;
 }
@@ -13,13 +13,6 @@ export interface SemanticMatch {
 export interface SemanticQueryOptions {
   /** Wanted number of items, not chunks. */
   topK?: number;
-  /**
-   * `hybrid` lets keyword rank influence the result, which is what a merged
-   * search wants. `vector` restricts it to distance, so every match carries a
-   * score — a caller that asked for similarity should not be handed an unscored
-   * keyword hit. Defaults to `hybrid`.
-   */
-  retrieval?: 'vector' | 'hybrid';
   itemType?: string;
   /** Inclusive publication-year bounds. */
   fromYear?: number;
@@ -35,7 +28,7 @@ export interface IndexStats {
   failed: number;
 }
 
-/** The search backend behind `zotero_search`, absent when AI Search is unbound. */
+/** The backend behind `zotero_semantic_search`, absent when AI Search is unbound. */
 export interface SemanticIndex {
   /**
    * Identifies the backing index. The sync cursor is namespaced by this, so

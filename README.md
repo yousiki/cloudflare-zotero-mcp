@@ -15,8 +15,9 @@ Desktop, Cursor, anything that speaks MCP — can read and write the same librar
   Zotero Desktop does, then records the resulting `md5`/`mtime` on the item.
 - **Reads PDFs.** Whole-document reads come from Zotero's own full-text index when it has one
   (free, instant); page ranges and outlines are extracted from the real file.
-- **Semantic search.** Cloudflare AI Search: hybrid BM25 + vector retrieval over
-  `@cf/baai/bge-m3` embeddings, RRF-fused and reranked, kept in step with the library by a
+- **Two searches.** `zotero_search` for literal text and fields, straight from the Zotero API;
+  `zotero_semantic_search` for meaning, over Cloudflare AI Search — hybrid BM25 + vector retrieval
+  on `@cf/baai/bge-m3` embeddings, RRF-fused and reranked, kept in step with the library by a
   cron-driven incremental sync.
 - **Imports references.** Resolve a DOI, arXiv id or ISBN to full metadata and attach an
   open-access PDF in one call.
@@ -84,8 +85,7 @@ WebDAV file sync for group libraries**, so file operations only work on your per
 Optional vars in `wrangler.jsonc`, with the values it ships with: `CONTACT_EMAIL` (unset —
 polite-pool access to CrossRef and OpenAlex), `AI_SEARCH_INSTANCE` (`zotero-items`),
 `EMBEDDING_MODEL` (`@cf/baai/bge-m3`), `RERANKING_MODEL` (`@cf/baai/bge-reranker-base`),
-`AI_SEARCH_REWRITE_QUERY` (`false` — rewriting spends an extra LLM call to rephrase a query that an
-MCP client already phrased on purpose), `SYNC_BATCH_LIMIT` (`100` items per sync run),
+`SYNC_BATCH_LIMIT` (`100` items per sync run),
 `AUTH_USERNAME`.
 
 ### Deploy releases with GitHub Actions
@@ -134,7 +134,8 @@ with `bun run scripts/get-token.ts <origin> --out .token` and send it as
 
 | Tool | What it does |
 |---|---|
-| `zotero_search` | Text, tag, type, collection, citation-key and semantic search |
+| `zotero_search` | Zotero's own search: literal text and fields, tags, type, collection, citation key, ordered |
+| `zotero_semantic_search` | Meaning-based search over the AI Search index, scored, cannot be ordered |
 | `zotero_get_item` | Full metadata, optionally with children and BibTeX/CSL-JSON |
 | `zotero_create_items` | Create items from the server's own type templates |
 | `zotero_update_item` | Patch fields, creators, tags and collection membership |
@@ -174,55 +175,89 @@ so a key with no document is the normal case and not an error. A scan that canno
 instead: the library cursor advances on the strength of the delete returning, so reporting success
 here would leave documents behind for good.
 
+### Which search tool
+
+`zotero_search` goes to the Zotero Web API. It matches literal text and fields — titles, creators,
+dates, abstracts, tags, item type, collection, Better BibTeX citation key — orders results with
+`sort`/`direction`, scopes text matching with `qmode`, sees the library as it is right now, and
+returns nothing when nothing matches. Use it for a known author, a title fragment, an exact phrase,
+or whenever order matters.
+
+`zotero_semantic_search` goes to Cloudflare AI Search. Use it for a question about a topic rather
+than a known item: it finds papers that share no wording with the query. It ranks by closeness rather
+than filtering by it, so read the scores and the `note` instead of assuming relevance. It cannot order
+results, and it lags the library by up to one sync — the cron runs every six hours, so an item added
+minutes ago is found by `zotero_search` and not yet by this one, until `zotero_reindex` closes the
+gap. Where AI Search is not bound to the deployment the tool throws, naming `zotero_search` as the
+one to use instead.
+
+Neither tool recalls the body text of a PDF, and `zotero_search` is where that surprises people:
+`qmode: "everything"` does search Zotero's full-text index, but Zotero answers such a hit with the
+*attachment*, and attachments are excluded unless `itemType` says otherwise — so a phrase that
+appears only in a PDF body returns nothing. Pass `itemType: "attachment"` to find it, then look up
+its `parentItem` yourself. This is long-standing behaviour, changed by neither the AI Search
+migration nor the split into two tools.
+
 ### Reading semantic scores
 
-Retrieval depends on the mode. `mode: auto` runs hybrid: AI Search searches with BM25 and vectors
-over the same documents and fuses the two rankings with RRF. `mode: semantic` restricts it to vector
-distance, because that mode's contract is that its results are scored and hybrid can return a pure
-keyword hit with no distance at all. Both rerank with `@cf/baai/bge-reranker-base`, and both search
-chunked documents, so a long abstract matches on its closest passage rather than on its average.
+Semantic retrieval is hybrid, not vector-only: AI Search searches with BM25 and vectors over the same
+documents, fuses the two rankings with RRF, and reranks with `@cf/baai/bge-reranker-base`. Documents
+are chunked, so a long abstract matches on its closest passage rather than on its average. Hybrid
+because a caller reaches for this tool *instead of* `zotero_search`, never alongside it — choosing
+between them is a guess, so this one has to carry lexical precision of its own. An exact name like
+"Sparse VideoGen2" is something a lexical index matches directly and vector distance only approximates.
 
-Nearest-neighbour search cannot come up empty: it returns the `limit` closest documents whatever the
-query, so asking about something the library does not cover still yields a full, confident-looking
-page. Every match that has a distance therefore carries a `score`, and `zotero_search` reports how
-many fell below `minScore` (0.5 by default) in `belowThreshold`, with a note saying so. Nothing is
-filtered out — a floor set too high would hide real hits without a trace, which is also why the
-backend's own `match_threshold` is pinned to 0 rather than left at its default of 0.4.
+The price of that is rows without a score. The reported `score` is the cosine half of the match
+(`scoring_details.vector_score`), never the fused score: the bands below were measured on cosine, and
+a value mixing in BM25 rank is not on that scale. Hybrid retrieval does not report a distance for
+every result, so some rows arrive with no `score` at all — absent means "no similarity was reported
+for this result", never zero. The output counts all three cases: `scored` is how many rows
+came back with a score, `belowThreshold` how many of *those* fell under `minScore`, and `unscored`
+how many had none, with a note saying how many rows the floor could not be applied to. Read
+`belowThreshold` against `scored`, never against `total`.
 
-The reported `score` is the cosine half of the match (`scoring_details.vector_score`), never the
-fused hybrid score: the bands below were measured on cosine, and a value mixing in BM25 rank is not
-on that scale. A document that matched on keywords alone reports no score at all, exactly like a
-keyword hit from Zotero.
+Low-scoring candidates are kept and reported rather than dropped, because `minScore` is advisory.
+Retrieval ranks by distance rather than filtering by it, so the presence of results says nothing about
+relevance: a query the library does not cover still gets back its nearest documents. The tool can
+still come back empty — an unfilled index, filters that discard every candidate, or matches Zotero no
+longer has — and each of those is reported in `note` rather than smoothed over.
 
-On a ~1000-item ML library, unrelated queries score around 0.32 and on-topic ones 0.55–0.60, in
-either English or Chinese. The band between is genuinely ambiguous, so read the spread rather than
-any single value: scores that are all low *and* nearly identical mean the index had nothing to offer.
+`minScore` (0.5 by default) is an advisory floor that reports rather
+than discards — a floor set too high would hide real hits without a trace, which is also why the
+backend's own `match_threshold` is pinned to 0, for retrieval *and* for reranking, instead of left at
+its default of 0.4.
 
-Filters apply to semantic matches too — `tags`, `itemType`, `collectionKey`, `since` and the
-`fromYear`/`toYear` bounds constrain both halves of `auto`, so a result never slips through on
-similarity alone. Only `itemtype` and `year` are pushed down into the search itself: AI Search
-allows five custom metadata fields per instance, has no array type, and re-indexes the library when
-that schema changes, so tags, collection membership, negated item types and `since` are enforced by
-the Zotero `itemKey` lookup that fetches the matched items anyway. Matches discarded that way are
-reported in `note`. `sort` orders keyword results only; semantic matches keep the fused, reranked
-order they came back in, with an item ranked by the first of its chunks to appear.
+The bands, measured on a ~1000-item ML library with `@cf/baai/bge-m3`: a query with nothing to do
+with the library scores 0.315–0.332; an adjacent field the library does not actually cover,
+0.498–0.525; on topic, 0.552–0.596 in English and 0.566–0.593 in Chinese, so a cross-language query
+costs nothing. The middle two bands nearly touch, which is why 0.5 warns instead of filtering: read
+the spread rather than any single value, because scores that are all low *and* nearly identical mean
+the index had nothing to offer.
 
-`mode: auto` runs a Zotero keyword search alongside AI Search and merges the two, but the merge is a
-concatenation rather than a fusion: semantic results come first, and the list is cut to `limit`.
-Because the semantic half is already capped at `limit`, a keyword-only match reaches you *only* when
-the semantic half returned fewer than `limit` items — an empty or small index, or filters that
-discarded candidates. Otherwise the keyword half is truncated away entirely.
+Filters narrow semantic results too, in two places. Only `itemtype` and `year` are pushed down into
+the search itself: AI Search allows five custom metadata fields per instance, has no array type, and
+re-indexes the library when that schema changes. `tags`, collection membership, negated item types
+and `since` are enforced afterwards, by the Zotero `itemKey` lookup that fetches the matched items
+anyway — `collectionKey` against `data.collections`, which is direct membership, exactly what
+`/collections/<key>/items` returns without `recursive=1`. The `fromYear`/`toYear` bounds are
+re-checked there too, on the same first-four-digit date parse the index stores, so the pushed-down
+filter and the local one cannot disagree about an item. Because those checks run after the backend
+has applied its own limit, a filtered query asks for `FILTER_OVERSHOOT` — three — times the
+candidates it needs; otherwise one tag turns 20 requested results into two. `zotero_search` does the
+same for its year bounds, the only filter it applies locally. Matches the semantic tool discards on
+the way — filtered out, or gone from Zotero since the index was written — are counted in its `note`.
 
-That makes its two apparent benefits conditional. Zotero is authoritative about the library right now
-while the index lags a cron cycle, so a just-added item is found by the keyword half — and then
-dropped if semantic already filled the page. `sort` orders only the keyword half, so in `auto` it is
-usually ordering rows that never survive; use `mode: keyword` when ordering matters.
+The two tools also differ in what they will accept. `zotero_search` takes `limit` up to 100;
+`zotero_semantic_search` stops at 25, because AI Search caps a query at 50 chunks and the tool asks
+for two chunks per wanted item — beyond 25 the overshoot no longer fits, and a larger `limit` would
+quietly return fewer results than asked for rather than failing. `includeTrashed` exists only on
+`zotero_search`: the index holds no trashed items, so the flag could not change a semantic result.
+For the same reason `itemType` cannot reach attachments, notes or annotations there — those are never
+indexed, whatever you pass.
 
-It does *not* add PDF full-text recall, despite `qmode=everything` searching Zotero's full-text
-index. Zotero answers such a hit with the attachment rather than the paper, and attachments are
-excluded by default, so a phrase that appears only in a PDF body returns nothing — pass
-`itemType: "attachment"` to find it, then look up its `parentItem` yourself. This is long-standing
-behaviour, not something the AI Search migration changed.
+Order is not on offer on the semantic side: results keep the fused, reranked order they came back in,
+with an item ranked by the first of its chunks to appear. `sort`, `direction`, `qmode` and
+`citationKey` exist only on `zotero_search`.
 
 ## How WebDAV writes work
 
@@ -255,9 +290,10 @@ bun run scripts/get-token.ts http://localhost:8787 --out .token
 bun run scripts/e2e.ts http://localhost:8787/mcp "$(cat .token)" --write
 ```
 
-AI Search has no local emulation, so semantic search degrades to keyword search under
-`wrangler dev`. Add `"remote": true` to the `ai_search_namespaces` binding to work against the real
-instance instead.
+AI Search has no local emulation, so `zotero_semantic_search` does not work under `wrangler dev`: it
+errors rather than quietly answering with something else. Add `"remote": true` to the
+`ai_search_namespaces` binding to work against the real instance instead, or use `zotero_search`,
+which only needs the Zotero API.
 
 The decisive check for anything touching files is still Zotero Desktop: sync it and confirm the
 item, the file and the filename all landed.

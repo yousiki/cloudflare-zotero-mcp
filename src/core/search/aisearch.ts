@@ -21,11 +21,11 @@ export interface AiSearchSettings {
   embeddingModel: string;
   rerankingModel: string;
   /**
-   * Rewriting spends an extra LLM call to rephrase the query. The caller here
-   * is already a model that phrased the query on purpose, so this is off unless
-   * asked for.
+   * Query rewriting is deliberately absent. AI Search only rewrites when a
+   * request uses the `messages` format *and* carries conversation history — the
+   * first message is always used as-is — and MCP is stateless, so every call
+   * here is a single standalone query. The setting could never fire.
    */
-  rewriteQuery: boolean;
 }
 
 export const DEFAULT_EMBEDDING_MODEL = '@cf/baai/bge-m3';
@@ -41,6 +41,13 @@ const CHUNKS_PER_ITEM = 2;
 
 /** `max_num_results` is rejected above 50. */
 const MAX_CHUNKS = 50;
+
+/**
+ * The largest number of items a query can honestly promise. Above this the chunk
+ * overshoot no longer fits under `MAX_CHUNKS`, so asking for more would quietly
+ * return fewer than requested instead of failing.
+ */
+export const MAX_SEMANTIC_ITEMS = Math.floor(MAX_CHUNKS / CHUNKS_PER_ITEM);
 
 /** `items.list` returns at most 50 per page. */
 const LIST_PAGE = 50;
@@ -95,7 +102,6 @@ export class AiSearchSemanticIndex implements SemanticIndex {
       embedding_model: this.settings.embeddingModel,
       reranking: true,
       reranking_model: this.settings.rerankingModel,
-      rewrite_query: this.settings.rewriteQuery,
       chunk: true,
       // Nothing is dropped for being far away; see `match_threshold` in `query`.
       score_threshold: 0,
@@ -128,18 +134,23 @@ export class AiSearchSemanticIndex implements SemanticIndex {
       query: text,
       ai_search_options: {
         retrieval: {
-          retrieval_type: options.retrieval ?? 'hybrid',
+          // Hybrid, not vector-only. `zotero_semantic_search` is a tool the caller
+          // may pick *instead of* `zotero_search`, never alongside it, so it has to
+          // carry lexical precision of its own: an exact name like "Sparse
+          // VideoGen2" is something BM25 nails and distance only approximates. The
+          // cost is that a BM25-only chunk has no `vector_score`; the tool reports
+          // those as unscored rather than inventing a number on the wrong scale.
+          retrieval_type: 'hybrid',
           max_num_results: Math.min(wanted * CHUNKS_PER_ITEM, MAX_CHUNKS),
           // 0, not the 0.4 default: this search reports how weak its matches are
-          // rather than hiding them, so the floor lives in `zotero_search` and
-          // nothing is discarded on the way here.
+          // rather than hiding them, so the floor lives in `zotero_semantic_search`
+          // and nothing is discarded on the way here.
           match_threshold: 0,
           ...(Object.keys(filters).length > 0
             ? { filters: filters as VectorizeVectorMetadataFilter }
             : {}),
         },
         reranking: { enabled: true, match_threshold: 0 },
-        query_rewrite: { enabled: this.settings.rewriteQuery },
       },
     });
 
@@ -150,9 +161,9 @@ export class AiSearchSemanticIndex implements SemanticIndex {
     for (const chunk of response.chunks) {
       const itemKey = itemKeyOf(chunk.item.key);
       // Only the cosine half is reported. The fused score mixes in BM25 rank and
-      // is not on the same scale as the bands `zotero_search` judges against, and
-      // a chunk that matched on keywords alone has no distance to report — just
-      // like a keyword hit from Zotero, which carries no score either.
+      // is not on the same scale as the bands `zotero_semantic_search` judges
+      // against, so a chunk with no `vector_score` is passed through unscored
+      // rather than given the fused number.
       const score = chunk.scoring_details?.vector_score;
       const existing = seen[itemKey];
       if (existing) {
