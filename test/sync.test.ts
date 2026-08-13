@@ -205,10 +205,25 @@ describe('document payloads', () => {
     expect(documentText(long.data).length).toBeLessThanOrEqual(6000);
   });
 
-  test('carries only the two fields the backend can push down', () => {
+  test('carries only the two fields the backend can push down, as strings', () => {
     // Five custom fields is the cap and a schema change re-indexes the library,
     // so anything that is not a filter has no business being here.
-    expect(documentMetadata(item('AAAA1111'))).toEqual({ itemtype: 'journalArticle', year: 2020 });
+    //
+    // Strings, not numbers: the upload API takes Record<string, string> and parses
+    // a `number` field itself. Sending 2020 as a number is rejected with
+    // `invalid_metadata_format`, which presents as an instance that indexes
+    // nothing while looking perfectly healthy.
+    expect(documentMetadata(item('AAAA1111'))).toEqual({
+      itemtype: 'journalArticle',
+      year: '2020',
+    });
+    for (const value of Object.values(documentMetadata(item('AAAA1111')))) {
+      expect(typeof value).toBe('string');
+    }
+  });
+
+  test('sends year 0 as a string when the date has no four-digit year', () => {
+    expect(documentMetadata(item('B', { date: 'n.d.' })).year).toBe('0');
   });
 
   test('keeps child objects and trashed items out of the index', () => {

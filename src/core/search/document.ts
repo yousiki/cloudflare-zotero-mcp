@@ -45,11 +45,16 @@ export function documentText(data: ZoteroItemData): string {
  *
  * Field names are stored lowercase and matched case-insensitively, so the keys
  * here are lowercase to match the filters built against them.
+ *
+ * Every value is a string, including `year`. The upload API takes
+ * `Record<string, string>` and parses a `number` field to float on its side; a
+ * real number goes out as `invalid_metadata_format` and the upload is rejected,
+ * which shows up as an instance that exists and indexes nothing at all.
  */
-export function documentMetadata(item: ZoteroItem): Record<string, string | number> {
+export function documentMetadata(item: ZoteroItem): Record<string, string> {
   return {
     itemtype: String(item.data.itemType ?? ''),
-    year: Number(String(item.data.date ?? '').match(/\d{4}/)?.[0] ?? 0),
+    year: String(Number(String(item.data.date ?? '').match(/\d{4}/)?.[0] ?? 0)),
   };
 }
 

@@ -104,6 +104,14 @@ floor actually judged. `respondSemantic` therefore reports `scored`, `belowThres
 separately and pushes a note saying how many rows the floor could not be applied to. Drop the note or
 fold `unscored` into `belowThreshold` and the output starts making a claim about rows nobody scored.
 
+**Upload metadata values are strings, even the numeric ones.** `items.upload` takes
+`Record<string, string>`; a field declared `data_type: 'number'` is parsed to float on AI Search's
+side. `documentMetadata` therefore stringifies `year`. Sending it as a real number fails the upload
+with `invalid_metadata_format` — and because `ensure()` still succeeds, the result is an instance that
+exists, reports a healthy status, and indexes nothing at all. `wrangler ai-search stats` showing every
+column at 0 after a sync run is the symptom. The local `AiSearchUploadItemOptions` type says
+`Record<string, unknown>`, which is looser than the API, so TypeScript will not catch this.
+
 **A parameter the index cannot honour must not be advertised.** `sharedFilters` deliberately carries
 only what behaves identically in both tools. `includeTrashed` is keyword-only because `isIndexable`
 drops trashed items, so the flag could never change a semantic result; `itemType` needs a different
