@@ -12,7 +12,7 @@ import { registerNoteTools } from './tools/notes.js';
 import { registerSearchTools } from './tools/search.js';
 
 export const SERVER_NAME = 'zotero-mcp';
-export const SERVER_VERSION = '0.2.1';
+export const SERVER_VERSION = '0.2.2';
 
 const INSTRUCTIONS = `Read/write access to a Zotero library whose files live on WebDAV.
 
