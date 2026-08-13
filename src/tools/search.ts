@@ -55,9 +55,11 @@ const DEFAULT_ITEM_TYPE_FILTER = '-attachment';
  * and teach the reader to ignore the warning.Hence a reported score rather than
  * a filter — a flat, uniformly low spread says more than any one value does.
  *
- * The bands were measured against a single vector per item.AI Search chunks a
- * document, so a long abstract now matches on its closest passage instead of its
- * average, which moves scores up rather than down; the floor stays advisory.
+ * The bands were measured against a single vector per item, which is what the
+ * index is configured to produce: chunking at bge-m3's 512-token ceiling leaves a
+ * measured item's document whole. The long tail that still splits matches on its
+ * closest passage instead of its average, moving those scores up rather than
+ * down — one more reason the floor reports instead of filtering.
  */
 const DEFAULT_MIN_SCORE = 0.5;
 

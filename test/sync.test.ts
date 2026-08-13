@@ -70,6 +70,11 @@ class FakeAiSearchInstance {
   endlessList = false;
   /** Makes `stats` throw, as it does when the service is unreachable. */
   statsFails = false;
+  /**
+   * What `info` reports. Defaults to what this build creates, so only the test
+   * that cares about a stale instance has to say otherwise.
+   */
+  chunkSize: number | undefined = 512;
   private counter = 0;
 
   async info() {
@@ -78,7 +83,7 @@ class FakeAiSearchInstance {
       error.name = 'AiSearchNotFoundError';
       throw error;
     }
-    return { id: 'zotero-items' };
+    return { id: 'zotero-items', chunk_size: this.chunkSize };
   }
 
   async search(params: { ai_search_options?: unknown }) {
@@ -249,6 +254,12 @@ describe('AiSearchSemanticIndex', () => {
       // Nothing may be dropped for scoring low; the floor is advisory and lives
       // in zotero_search.
       score_threshold: 0,
+      // 512 is bge-m3's input ceiling on Workers AI, and a measured item's
+      // document lands under it — so one item is one chunk, which is what lets a
+      // page of results spend one slot per item. The service default of 256 would
+      // split every document in two.
+      chunk_size: 512,
+      chunk_overlap: 10,
     });
     expect(namespace.instance.config?.custom_metadata).toEqual([
       { field_name: 'itemtype', data_type: 'text' },
@@ -261,6 +272,37 @@ describe('AiSearchSemanticIndex', () => {
     namespace.instance.exists = true;
     await index.ensure();
     expect(namespace.instance.config).toBeNull();
+    expect((await index.ensure()).mismatch).toBeUndefined();
+  });
+
+  test('reports an instance chunking smaller than this build expects', async () => {
+    const { namespace, index } = fakeIndex();
+    namespace.instance.exists = true;
+    // What an instance created before chunk_size was pinned still looks like.
+    namespace.instance.chunkSize = 256;
+
+    const { created, mismatch } = await index.ensure();
+
+    // Reported, not repaired: applying chunk_size re-indexes the library, which
+    // ensure() must not start on its own.
+    expect(created).toBe(false);
+    expect(namespace.instance.config).toBeNull();
+    expect(mismatch).toContain('256');
+    expect(mismatch).toContain('512');
+  });
+
+  test('says nothing when the instance chunks larger, or does not report it', async () => {
+    const { namespace, index } = fakeIndex();
+    namespace.instance.exists = true;
+
+    // Larger means fewer chunks per item, so no result slot is oversubscribed.
+    namespace.instance.chunkSize = 1024;
+    expect((await index.ensure()).mismatch).toBeUndefined();
+
+    // An API that omits the field says nothing about the instance; inventing a
+    // warning from silence would be worse than staying quiet.
+    namespace.instance.chunkSize = undefined;
+    expect((await index.ensure()).mismatch).toBeUndefined();
   });
 
   test('uploads one document per item, keyed so a change replaces it', async () => {
@@ -296,6 +338,25 @@ describe('AiSearchSemanticIndex', () => {
     // reporting them in belowThreshold.
     expect(request?.ai_search_options.retrieval.match_threshold).toBe(0);
     expect(request?.ai_search_options.retrieval.retrieval_type).toBe('hybrid');
+  });
+
+  test('lets any query term carry the keyword half, and refuses to mask a failed retrieval', async () => {
+    const { backend, index } = fakeIndex();
+    await index.query('methods for accelerating video diffusion inference');
+
+    const [request] = backend.searchRequests as Array<{
+      ai_search_options: {
+        retrieval: { keyword_match_mode: string; return_on_failure: boolean };
+      };
+    }>;
+    // 'and' is the service default and would require all six terms in one
+    // ~400-token chunk, so the BM25 half would contribute nothing on exactly the
+    // natural-language phrasing zotero_semantic_search asks its callers for.
+    expect(request?.ai_search_options.retrieval.keyword_match_mode).toBe('or');
+    // The default, true, returns an empty page when retrieval fails — which
+    // zotero_semantic_search would report as an unfilled index and a suggestion
+    // to run zotero_reindex.
+    expect(request?.ai_search_options.retrieval.return_on_failure).toBe(false);
   });
 
   test('pushes down the filters the backend can enforce, and no others', async () => {
@@ -335,10 +396,9 @@ describe('AiSearchSemanticIndex', () => {
 
   test('returns no more items than topK asked for', async () => {
     const { backend, index } = fakeIndex();
-    // The chunk overshoot asks the backend for twice the wanted item count, so
-    // when every chunk belongs to a different item the fold yields twice as many
-    // matches as the caller wanted — and the caller turns each one into a key in
-    // a Zotero lookup.
+    // The backend is free to answer with more chunks than were budgeted, and the
+    // caller turns every match into a key in a Zotero lookup — so the fold has to
+    // cut back to the item count that was actually asked for.
     backend.chunks = Array.from({ length: 8 }, (_, offset) => ({
       key: `KEY0000${offset}`,
       score: 0.9 - offset * 0.01,
@@ -420,6 +480,42 @@ describe('syncSemanticIndex', () => {
     expect(report.toVersion).toBe(6);
     expect(backend.documents.size).toBe(2);
     expect(JSON.parse(store.store.get(CURSOR_KEY) as string).since).toBe(6);
+  });
+
+  test('carries a misconfigured index into the report of an otherwise clean run', async () => {
+    const { deps, backend } = fakeDeps([
+      route('GET', '/users/1/items', (request) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get('format') === 'versions') {
+          return jsonResponse({ AAAA1111: 5 }, { version: 6 });
+        }
+        return jsonResponse([item('AAAA1111')], { version: 6 });
+      }),
+    ]);
+    backend.chunkSize = 256;
+
+    const report = await syncSemanticIndex(deps);
+
+    // The sync itself has nothing to apologise for — which is exactly why the
+    // warning needs its own field instead of a hint buried in `message`.
+    expect(report.complete).toBe(true);
+    expect(report.submitted).toBe(1);
+    expect(report.warning).toContain('chunks at 256 tokens');
+    expect(report.message).not.toContain('256');
+  });
+
+  test('leaves the warning null when the index is configured as this build expects', async () => {
+    const { deps } = fakeDeps([
+      route('GET', '/users/1/items', (request) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get('format') === 'versions') {
+          return jsonResponse({}, { version: 6 });
+        }
+        return jsonResponse([], { version: 6 });
+      }),
+    ]);
+
+    expect((await syncSemanticIndex(deps)).warning).toBeNull();
   });
 
   test('reports the indexing backlog, because submitted is not searchable', async () => {

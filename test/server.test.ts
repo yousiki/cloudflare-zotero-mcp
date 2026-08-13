@@ -255,8 +255,9 @@ describe('MCP surface', () => {
     expect(properties.direction).toBeUndefined();
     expect(properties.qmode).toBeUndefined();
     expect(properties.citationKey).toBeUndefined();
-    // Above MAX_SEMANTIC_ITEMS the chunk overshoot no longer fits under the
-    // backend's cap, so a larger limit would quietly return fewer than asked.
+    // MAX_SEMANTIC_ITEMS is where the backend's 50-chunk ceiling lands once an
+    // item's chunks are folded back together, so a larger limit would quietly
+    // return fewer than asked rather than failing.
     expect(properties.limit?.maximum).toBe(MAX_SEMANTIC_ITEMS);
 
     const keyword = tools.find((tool) => tool.name === 'zotero_search')?.inputSchema;

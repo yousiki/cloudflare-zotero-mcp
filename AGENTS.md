@@ -117,8 +117,8 @@ only what behaves identically in both tools. `includeTrashed` is keyword-only be
 drops trashed items, so the flag could never change a semantic result; `itemType` needs a different
 description on each side because `SKIPPED_TYPES` means attachments, notes and annotations are never
 searchable semantically whatever the caller passes; and `limit` caps at `MAX_SEMANTIC_ITEMS`, derived
-as `MAX_CHUNKS / CHUNKS_PER_ITEM`, because above that the chunk overshoot stops fitting under the
-backend's 50-chunk ceiling and a larger `limit` silently returns fewer rows than requested. Sharing
+as `MAX_CHUNKS / CHUNKS_PER_ITEM`, because above that the chunks a page can hold no longer cover the
+items it promises and a larger `limit` silently returns fewer rows than requested. Sharing
 those three fields for tidiness is how the schema ends up promising three things it cannot do — and
 the tests that exercise behaviour will all still pass, because the lie is in the advertisement.
 
@@ -193,13 +193,23 @@ gave up early would strand those documents permanently, with nothing left to poi
 `MAX_LIST_PAGES` throws instead of breaking out.
 
 **Instance config lives in code.** `AiSearchSettings` and `ensure()` hold everything this code
-depends on — hybrid retrieval, RRF fusion, chunking, reranking, `score_threshold: 0`, the two
-metadata fields — which is why a fresh deploy needs no dashboard step. `ensure()` creates a missing
-instance and deliberately never updates an existing one: changing `custom_metadata` or the embedding
-model re-indexes the whole library, and a cron run must not start that behind the operator's back.
-Editing those settings is a migration, not a config change.
+depends on — hybrid retrieval, RRF fusion, `CHUNK_SIZE`/`CHUNK_OVERLAP`, reranking,
+`score_threshold: 0`, the two metadata fields — which is why a fresh deploy needs no dashboard step.
+`ensure()` creates a missing instance and deliberately never updates an existing one: changing
+`custom_metadata`, the embedding model or the chunking re-indexes the whole library, and a cron run
+must not start that behind the operator's back. Editing those settings is a migration, not a config
+change.
 
-**A new instance invalidates the cursor.** `ensure()` returns `{ created }` and `syncSemanticIndex`
+**Which means a stale instance has to be reported, not corrected.** `CHUNK_SIZE` is 512 because that
+is bge-m3's input ceiling on Workers AI, and `CHUNKS_PER_ITEM` is 1 *because* of it — a measured
+item's document fits in one chunk. An instance created before that was pinned still chunks at the
+service default of 256, which does not fail: every document splits in two, each item spends two of
+the slots a query budgets one for, and searches quietly return about half the items requested. So
+`ensure()` compares and returns `mismatch`, `syncSemanticIndex` carries it as `warning`, and both the
+cron log and `zotero_reindex` surface it. A silent halving is the failure mode worth spending a
+field on.
+
+**A new instance invalidates the cursor.** `ensure()` returns `created` and `syncSemanticIndex`
 treats `created` exactly like `full: true`, because a just-created instance is empty however far
 along the stored cursor is. Without that, deleting the instance — or pointing `AI_SEARCH_INSTANCE` at
 a new one — while the cursor sits at the newest library version gives every later run `pending: []`

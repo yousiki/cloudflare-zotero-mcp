@@ -54,6 +54,12 @@ export interface SyncReport {
   toVersion: number;
   /** True when every change has been *submitted*, not when indexing is done. */
   complete: boolean;
+  /**
+   * A configuration problem the run could not fix on its own, or null when there
+   * is none. Separate from `message`, which describes what this run did: the sync
+   * can succeed completely and still be writing into a misconfigured index.
+   */
+  warning: string | null;
   message: string;
 }
 
@@ -81,8 +87,9 @@ export async function syncSemanticIndex(options: SyncOptions): Promise<SyncRepor
   // same treatment as an explicit full run. Skipping this is how an index that
   // was deleted and recreated stays empty for good: the library has not changed
   // since the cursor was written, so an incremental run finds nothing to do.
-  const { created } = await index.ensure();
+  const { created, mismatch } = await index.ensure();
   const full = options.full || created;
+  const warning = mismatch ?? null;
 
   const saved = full ? null : await readState(store, stateKey);
 
@@ -117,6 +124,7 @@ export async function syncSemanticIndex(options: SyncOptions): Promise<SyncRepor
         fromVersion: since,
         toVersion: library,
         complete: true,
+        warning,
         message: `Nothing changed since library version ${since}.`,
       };
     }
@@ -143,6 +151,7 @@ export async function syncSemanticIndex(options: SyncOptions): Promise<SyncRepor
     fromVersion: state.since,
     toVersion: state.target,
     complete,
+    warning,
     message: complete
       ? `Submitted ${submitted} item(s). Every change up to library version ${state.target} has been sent; ${describeBacklog(backlog)}.`
       : `Submitted ${submitted} item(s); ${remaining.length} still queued for the next run.`,
@@ -226,6 +235,7 @@ function emptyReport(message: string): SyncReport {
     fromVersion: 0,
     toVersion: 0,
     complete: true,
+    warning: null,
     message,
   };
 }
