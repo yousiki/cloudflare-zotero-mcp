@@ -1,6 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
-import type { ZoteroItem } from '../core/zotero/types.js';
 
 /** Zotero object keys are eight uppercase alphanumerics. */
 export const objectKey = z
@@ -74,16 +73,4 @@ export function assertNoFailures(failures: string[], action: string): void {
       `Zotero rejected ${failures.length} object(s) while ${action}:\n${failures.join('\n')}`,
     );
   }
-}
-
-/** Deduplicates items by key while preserving order. */
-export function dedupeItems(items: ZoteroItem[]): ZoteroItem[] {
-  const seen = new Set<string>();
-  const out: ZoteroItem[] = [];
-  for (const item of items) {
-    if (seen.has(item.key)) continue;
-    seen.add(item.key);
-    out.push(item);
-  }
-  return out;
 }

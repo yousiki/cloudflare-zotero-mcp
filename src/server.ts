@@ -16,7 +16,10 @@ export const SERVER_VERSION = '0.1.0';
 
 const INSTRUCTIONS = `Read/write access to a Zotero library whose files live on WebDAV.
 
-Start with zotero_search to find items, then zotero_get_item for full metadata and
+There are two ways in. Use zotero_search when you know what you are looking for — an
+author, a title fragment, an exact phrase — or when results need ordering. Use
+zotero_semantic_search for questions about a topic; it ranks by closeness with advisory
+scores, so check them. Then zotero_get_item for full metadata and
 zotero_read_attachment for the text of a PDF. Attachment reads accept a parent item key
 and pick the right PDF themselves.
 

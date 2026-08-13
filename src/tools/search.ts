@@ -2,69 +2,86 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { ZoteroMcpContext } from '../context.js';
 import { formatItemList, itemSummary } from '../core/format/items.js';
+import { MAX_SEMANTIC_ITEMS } from '../core/search/aisearch.js';
 import type { ZoteroClient } from '../core/zotero/client.js';
 import type { QueryParams, ZoteroItem } from '../core/zotero/types.js';
-import { dedupeItems, itemSummarySchema, objectKey, textResult } from './common.js';
+import { itemSummarySchema, objectKey, textResult } from './common.js';
 
 /**
  * Zotero accepts exactly one negated `itemType`. Repeated params are ignored
  * and `-attachment || -note` is rejected outright ("Invalid itemType '-note'"),
  * so attachments — the noisy ones, since `qmode=everything` matches their
  * indexed full text — are all we can exclude by default.
+ *
+ * Note what that costs. A full-text hit *is* the attachment as far as Zotero is
+ * concerned, so excluding attachments discards it rather than resolving it to the
+ * paper it belongs to. A phrase that appears only inside a PDF therefore returns
+ * nothing here, even though `itemType: 'attachment'` finds it. Promoting those
+ * hits through `data.parentItem` would be the fix; nothing does that today.
  */
 const DEFAULT_ITEM_TYPE_FILTER = '-attachment';
 
 /**
- * Vectorize is a nearest-neighbour search, not a filter: it returns the `topK`
- * closest vectors however far away they are, so a question the library simply
- * does not cover comes back as a full page of confident-looking results. Nothing
- * is dropped — a floor tuned wrong would hide real hits, and silently — but
- * every semantic hit reports its score and anything under the floor is counted
- * in `belowThreshold`, which is the difference between recall and relevance.
+ * Semantic retrieval ranks candidates by distance rather than filtering by it, so
+ * the presence of results says nothing about relevance: a query the library does
+ * not cover still gets back its nearest documents. Low-scoring candidates are
+ * therefore kept and reported rather than dropped — `minScore` is advisory, every
+ * hit that has a distance carries it, and the ones under the floor are counted in
+ * `belowThreshold` and called out in `note`. A floor that filtered would hide real
+ * hits, and hide that it did.
  *
- * Measured on a ~1000-item ML library with `@cf/baai/bge-m3`:
+ * The tool can still come back empty — an unfilled index, filters that discard
+ * every candidate, or matches Zotero no longer has — and each of those says
+ * something specific, so they are reported in `note` rather than smoothed over.
+ * What never happens is retrieval running out of neighbours to offer.
  *
- * | query                                    | score band     |
- * |------------------------------------------|----------------|
- * | nothing to do with the library           | 0.315 – 0.332  |
- * | adjacent field, absent from the library   | 0.498 – 0.525  |
- * | on topic, English                        | 0.552 – 0.596  |
- * | on topic, Chinese (same topic)           | 0.566 – 0.593  |
+ * The score judged here is the cosine half of the match, never the fused hybrid
+ * score: AI Search combines BM25 rank with vector distance, and the result is not
+ * on the scale these bands were measured on.
  *
- * Cross-language costs nothing — bge-m3 puts a Chinese query on the same scale
- * as its English equivalent. But the middle two bands nearly touch, so no single
+ * Measured on a ~1000 - item ML library with `@cf/baai/bge-m3`:
+ *
+ * | query | score band |
+ * | ------------------------------------------| ----------------|
+ * | nothing to do with the library | 0.315 – 0.332 |
+ * | adjacent field, absent from the library | 0.498 – 0.525 |
+ * | on topic, English | 0.552 – 0.596 |
+ * | on topic, Chinese(same topic) | 0.566 – 0.593 |
+ *
+ * Cross - language costs nothing — bge - m3 puts a Chinese query on the same scale
+ * as its English equivalent.But the middle two bands nearly touch, so no single
  * number separates "absent" from "on topic": 0.5 catches the wholly irrelevant
- * page without flagging genuine hits, while 0.55 would also flag on-topic papers
- * and teach the reader to ignore the warning. Hence a reported score rather than
+ * page without flagging genuine hits, while 0.55 would also flag on - topic papers
+ * and teach the reader to ignore the warning.Hence a reported score rather than
  * a filter — a flat, uniformly low spread says more than any one value does.
+ *
+ * The bands were measured against a single vector per item.AI Search chunks a
+ * document, so a long abstract now matches on its closest passage instead of its
+ * average, which moves scores up rather than down; the floor stays advisory.
  */
 const DEFAULT_MIN_SCORE = 0.5;
 
-const searchInput = z.object({
-  query: z
-    .string()
-    .optional()
-    .describe('Free text. Natural-language phrasing works best in semantic mode.'),
-  mode: z
-    .enum(['auto', 'keyword', 'semantic'])
-    .default('auto')
-    .describe(
-      'auto picks semantic for conceptual questions and keyword for short author/title lookups, then merges both.',
-    ),
-  qmode: z
-    .enum(['titleCreatorYear', 'everything'])
-    .optional()
-    .describe('Keyword scope. "everything" also searches abstracts and indexed full text.'),
+/**
+ * How many extra candidates to ask for when a filter is applied after the
+ * search. Both tools filter downstream of their own limit, so without this a
+ * single tag can turn 20 requested results into two.
+ */
+const FILTER_OVERSHOOT = 3;
+
+/* -------------------------------------------------------------------------- */
+/* Shared input                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Narrowing that behaves identically in both tools. `itemType`, `includeTrashed`
+ * and `limit` are deliberately *not* here: each means something different, or
+ * nothing at all, on the semantic side.
+ */
+const sharedFilters = {
   tags: z
     .array(z.string())
     .optional()
     .describe('All must match. Use "a || b" for OR and a leading "-" to exclude.'),
-  itemType: z
-    .string()
-    .optional()
-    .describe(
-      'e.g. journalArticle, book, preprint. Attachments are excluded unless you set this. Only one value, optionally negated with a leading "-".',
-    ),
   collectionKey: objectKey.optional().describe('Restrict to one collection.'),
   fromYear: z
     .number()
@@ -74,8 +91,18 @@ const searchInput = z.object({
       'Earliest publication year, inclusive. Items whose date has no four-digit year are excluded.',
     ),
   toYear: z.number().int().optional().describe('Latest publication year, inclusive.'),
-  citationKey: z.string().optional().describe('Better BibTeX citation key stored in Extra.'),
   since: z.number().int().optional().describe('Only objects modified after this library version.'),
+};
+
+const keywordInput = z.object({
+  query: z.string().optional().describe('Literal text. Matched, not interpreted.'),
+  qmode: z
+    .enum(['titleCreatorYear', 'everything'])
+    .optional()
+    .describe(
+      'Keyword scope. "everything" also searches abstracts. To search inside PDF text, pass itemType:"attachment" as well — full-text matches are attachments, which are otherwise excluded.',
+    ),
+  citationKey: z.string().optional().describe('Better BibTeX citation key stored in Extra.'),
   sort: z
     .enum([
       'dateAdded',
@@ -88,56 +115,96 @@ const searchInput = z.object({
       'publicationTitle',
     ])
     .optional()
-    .describe('Order of keyword results. Semantic matches always come back by similarity.'),
+    .describe('Order of results.'),
   direction: z.enum(['asc', 'desc']).optional(),
+  itemType: z
+    .string()
+    .optional()
+    .describe(
+      'e.g. journalArticle, book, preprint. Attachments are excluded unless you set this. Only one value, optionally negated with a leading "-".',
+    ),
   includeTrashed: z.boolean().default(false),
   limit: z.number().int().min(1).max(100).default(20),
+  ...sharedFilters,
+});
+
+const semanticInput = z.object({
+  query: z.string().describe('A question or description. Natural-language phrasing works best.'),
   minScore: z
     .number()
     .min(0)
     .max(1)
     .default(DEFAULT_MIN_SCORE)
     .describe(
-      'Advisory relevance floor for semantic matches, 0-1. Nothing is filtered: weaker matches are still returned, counted in belowThreshold and called out in note.',
+      'Advisory relevance floor, 0-1. Nothing is filtered: weaker matches are still returned, counted in belowThreshold and called out in note.',
     ),
+  itemType: z
+    .string()
+    .optional()
+    .describe(
+      'e.g. journalArticle, book, preprint. Only one value, optionally negated with a leading "-". Attachments, notes and annotations are never searchable here whatever you pass.',
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_SEMANTIC_ITEMS)
+    .default(20)
+    .describe(`Up to ${MAX_SEMANTIC_ITEMS}. Narrow with filters rather than asking for more.`),
+  ...sharedFilters,
 });
 
-const searchItemSchema = itemSummarySchema.extend({
+/* -------------------------------------------------------------------------- */
+/* Output                                                                     */
+/* -------------------------------------------------------------------------- */
+
+const keywordOutput = z.object({
+  total: z.number(),
+  items: z.array(itemSummarySchema),
+  note: z.string().optional(),
+});
+
+const semanticItemSchema = itemSummarySchema.extend({
   score: z
     .number()
     .optional()
     .describe(
-      'Cosine similarity, for semantic matches only. Absent on keyword matches, which matched the text exactly rather than by distance.',
+      'How close the match is, 0-1. Occasionally absent: that means no similarity was reported for this result, not that it scored zero.',
     ),
 });
 
-const searchOutput = z.object({
-  mode: z.string(),
+const semanticOutput = z.object({
   total: z.number(),
-  items: z.array(searchItemSchema),
+  items: z.array(semanticItemSchema),
   note: z.string().optional(),
-  minScore: z.number().optional().describe('The floor these results were judged against.'),
+  minScore: z.number().describe('The floor these results were judged against.'),
+  scored: z.number().describe('How many items came back with a similarity score.'),
   belowThreshold: z
     .number()
-    .optional()
     .describe(
-      'How many returned items scored under minScore. They are the nearest vectors available, not necessarily relevant — read their titles and abstracts before relying on them.',
+      'How many of the *scored* items fell under minScore. A low score means the match may be unrelated to the query — read its title and abstract before relying on it.',
+    ),
+  unscored: z
+    .number()
+    .describe(
+      'How many came back without a similarity score, so minScore could not be applied to them.',
     ),
 });
+
+/* -------------------------------------------------------------------------- */
 
 export function registerSearchTools(server: McpServer, context: ZoteroMcpContext): void {
   server.registerTool(
     'zotero_search',
     {
-      title: 'Search the Zotero library',
+      title: 'Search the Zotero library by text and fields',
       description:
-        'Find items by text, tag, type, collection, citation key or semantic similarity. Returns one compact line per item; follow up with zotero_get_item for details.',
-      inputSchema: searchInput,
-      outputSchema: searchOutput,
+        'Matches literal text and fields: titles, creators, dates, abstracts, tags, item type, collection, citation key. Results can be ordered. Use it for a known author, title fragment or exact phrase, or whenever order matters. Returns nothing when nothing matches. For questions about a topic rather than a known item, use zotero_semantic_search.',
+      inputSchema: keywordInput,
+      outputSchema: keywordOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async (input) => {
-      const mode = resolveMode(input.mode, input.query, context.semantic !== null);
       const notes: string[] = [];
 
       if (input.citationKey) {
@@ -146,92 +213,113 @@ export function registerSearchTools(server: McpServer, context: ZoteroMcpContext
           query: input.citationKey,
           qmode: 'everything',
         });
+        // `q` matches Extra as free text, so narrow to an exact Citation Key line.
         const exact = items.filter((item) =>
           new RegExp(
             `^\\s*Citation Key:\\s*${escapeRegExp(input.citationKey as string)}\\s*$`,
             'im',
           ).test(String(item.data.extra ?? '')),
         );
-        return respond('citationKey', exact.length > 0 ? exact : items, notes);
+        return respondKeyword(exact.length > 0 ? exact : items, notes);
       }
 
-      if (mode === 'keyword') {
-        return respond(mode, await keywordSearch(context.zotero, input), notes);
+      return respondKeyword(await keywordSearch(context.zotero, input), notes);
+    },
+  );
+
+  server.registerTool(
+    'zotero_semantic_search',
+    {
+      title: 'Search the Zotero library by meaning',
+      description:
+        'Finds items by meaning, including ones that share no wording with the query. Covers titles, creators, venues, tags and abstracts — not the body text of PDFs. Ranks by closeness rather than filtering by it, so results are not evidence that any of them fit: check each score and the note. Cannot order results, and may not yet include items added in the last few hours. For exact lookups or ordering, use zotero_search.',
+      inputSchema: semanticInput,
+      outputSchema: semanticOutput,
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async (input) => {
+      if (!context.semantic) {
+        throw new Error(
+          'Semantic search is unavailable: AI Search is not bound to this deployment. Use zotero_search for text and field queries.',
+        );
       }
-
-      const semantic = await semanticSearch(context, input, notes);
-      const scoring = { minScore: input.minScore, scores: semantic.scores };
-      if (mode === 'semantic') return respond(mode, semantic.items, notes, scoring);
-
-      // auto: semantic recall first, then keyword precision, deduplicated.
-      const keywordItems = await keywordSearch(context.zotero, input);
-      return respond(
-        'auto',
-        dedupeItems([...semantic.items, ...keywordItems]).slice(0, input.limit),
-        notes,
-        scoring,
-      );
+      const notes: string[] = [];
+      const { items, scores } = await semanticSearch(context, input, notes);
+      return respondSemantic(items, scores, input.minScore, notes);
     },
   );
 }
 
-type SearchInput = z.infer<typeof searchInput>;
+type KeywordInput = z.infer<typeof keywordInput>;
+type SemanticInput = z.infer<typeof semanticInput>;
+/**
+ * What the server-side filter builder needs. `itemType` and `includeTrashed` are
+ * declared per tool rather than shared, so they arrive optionally here.
+ */
+type Narrowing = z.infer<z.ZodObject<typeof sharedFilters>> & {
+  itemType?: string;
+  includeTrashed?: boolean;
+};
 
-/** Similarity per item key, and the floor to judge it against. */
-interface Scoring {
-  minScore: number;
-  scores: Map<string, number>;
-}
-
-function respond(mode: string, items: ZoteroItem[], notes: string[], scoring?: Scoring) {
-  const scored = items
-    .map((item) => scoring?.scores.get(item.key))
-    .filter((score): score is number => score !== undefined);
-  const below = scoring ? scored.filter((score) => score < scoring.minScore) : [];
-
-  if (scoring && below.length > 0) {
-    const weakest = Math.min(...below);
-    notes.push(
-      `${below.length} of ${items.length} result(s) scored below the ${scoring.minScore} relevance floor (weakest ${weakest.toFixed(3)}). Semantic search always returns its nearest vectors, so these may be unrelated to the query — read their titles and abstracts before relying on them.`,
-    );
-  }
-
-  const body = formatItemList(items, scoring?.scores);
+function respondKeyword(items: ZoteroItem[], notes: string[]) {
+  const body = formatItemList(items);
   const text =
     notes.length > 0 ? `${body}\n\n${notes.map((note) => `> ${note}`).join('\n')}` : body;
   return textResult(text, {
-    mode,
     total: items.length,
-    items: items.map((item) => {
-      const score = scoring?.scores.get(item.key);
-      return score === undefined ? itemSummary(item) : { ...itemSummary(item), score };
-    }),
+    items: items.map((item) => itemSummary(item)),
     ...(notes.length > 0 ? { note: notes.join(' ') } : {}),
-    ...(scoring ? { minScore: scoring.minScore, belowThreshold: below.length } : {}),
   });
 }
 
-function resolveMode(
-  requested: SearchInput['mode'],
-  query: string | undefined,
-  semanticAvailable: boolean,
-): 'keyword' | 'semantic' | 'auto' {
-  if (requested === 'keyword') return 'keyword';
-  if (!semanticAvailable || !query?.trim()) return 'keyword';
-  if (requested === 'semantic') return 'semantic';
-  // Short queries are almost always a name, a title fragment or a year — the
-  // things keyword search is exact about and embeddings are vague about.
-  const words = query.trim().split(/\s+/).length;
-  return words >= 4 || query.includes('?') ? 'auto' : 'keyword';
+function respondSemantic(
+  items: ZoteroItem[],
+  scores: Map<string, number>,
+  minScore: number,
+  notes: string[],
+) {
+  const present = items.map((item) => scores.get(item.key));
+  const below = present.filter((score): score is number => score !== undefined && score < minScore);
+  const unscored = present.filter((score) => score === undefined).length;
+
+  if (below.length > 0) {
+    const weakest = Math.min(...below);
+    notes.push(
+      `${below.length} of ${items.length} result(s) scored below the ${minScore} relevance floor (weakest ${weakest.toFixed(3)}). Results are ranked by closeness, not filtered by it, so these may be unrelated to the query — read their titles and abstracts before relying on them.`,
+    );
+  }
+  if (unscored > 0) {
+    // Not a gap in the data, and not a judgement about how the match was made:
+    // hybrid retrieval simply does not report a distance for every result. Saying
+    // so keeps `belowThreshold` from looking like it covered every row.
+    notes.push(
+      `${unscored} of ${items.length} result(s) came back without a similarity score, so the ${minScore} floor could not be applied to them.`,
+    );
+  }
+  const body = formatItemList(items, scores);
+  const text =
+    notes.length > 0 ? `${body}\n\n${notes.map((note) => `> ${note}`).join('\n')}` : body;
+  return textResult(text, {
+    total: items.length,
+    items: items.map((item) => {
+      const score = scores.get(item.key);
+      return score === undefined ? itemSummary(item) : { ...itemSummary(item), score };
+    }),
+    ...(notes.length > 0 ? { note: notes.join(' ') } : {}),
+    minScore,
+    scored: present.length - unscored,
+    belowThreshold: below.length,
+    unscored,
+  });
 }
 
 /**
- * The filters Zotero can apply server-side, shared by both paths so that `auto`
- * cannot return a semantic hit its keyword half would have excluded. `q`,
- * `qmode`, `sort` and `direction` stay out: they describe how to *find* and
- * order keyword results, and semantic results are found and ordered by distance.
+ * The filters Zotero can apply server-side. Both tools send them, so narrowing a
+ * semantic query cannot return something its keyword equivalent would have
+ * excluded. `q`, `qmode`, `sort` and `direction` stay out: they describe how to
+ * *find* and order text matches, and semantic results are found by distance.
  */
-function serverFilters(input: SearchInput): QueryParams {
+function serverFilters(input: Narrowing): QueryParams {
   return {
     // Without this, `qmode=everything` surfaces the attachments whose indexed
     // full text matched, instead of the papers they belong to.
@@ -244,12 +332,12 @@ function serverFilters(input: SearchInput): QueryParams {
 
 /**
  * Zotero has no year filter, so the bounds are applied here, on the same
- * first-four-digit parse `embeddingMetadata` uses — otherwise the Vectorize
- * pre-filter and this one would disagree about the same item. An unparsable
- * date is excluded rather than kept: Vectorize stores `year: 0` for it, so
- * keeping it here would make the two paths differ on exactly those items.
+ * first-four-digit parse `documentMetadata` uses — otherwise the pushed-down
+ * filter and this one would disagree about the same item. An unparsable date is
+ * excluded rather than kept: the index stores `year: 0` for it, so keeping it
+ * here would make the two paths differ on exactly those items.
  */
-function withinYears(item: ZoteroItem, input: SearchInput): boolean {
+function withinYears(item: ZoteroItem, input: Narrowing): boolean {
   if (!input.fromYear && !input.toYear) return true;
   const year = Number(String(item.data.date ?? '').match(/\d{4}/)?.[0] ?? 0);
   if (!year) return false;
@@ -257,7 +345,7 @@ function withinYears(item: ZoteroItem, input: SearchInput): boolean {
 }
 
 /** True when a filter can discard candidates after the search has run. */
-function isNarrowed(input: SearchInput): boolean {
+function isNarrowed(input: Narrowing): boolean {
   return Boolean(
     input.itemType ||
       input.tags?.length ||
@@ -268,14 +356,7 @@ function isNarrowed(input: SearchInput): boolean {
   );
 }
 
-/**
- * How many extra candidates to ask for when a filter is applied after the
- * search. Both paths filter downstream of their own limit, so without this a
- * single tag can turn 20 requested results into two.
- */
-const FILTER_OVERSHOOT = 3;
-
-async function keywordSearch(zotero: ZoteroClient, input: SearchInput): Promise<ZoteroItem[]> {
+async function keywordSearch(zotero: ZoteroClient, input: KeywordInput): Promise<ZoteroItem[]> {
   const query: QueryParams = {
     ...serverFilters(input),
     q: input.query,
@@ -297,11 +378,11 @@ async function keywordSearch(zotero: ZoteroClient, input: SearchInput): Promise<
 
 async function semanticSearch(
   context: ZoteroMcpContext,
-  input: SearchInput,
+  input: SemanticInput,
   notes: string[],
 ): Promise<{ items: ZoteroItem[]; scores: Map<string, number> }> {
   const empty = { items: [], scores: new Map<string, number>() };
-  if (!context.semantic || !input.query) return empty;
+  if (!context.semantic) return empty;
 
   const narrowed = isNarrowed(input);
   const matches = await context.semantic.query(input.query, {
@@ -314,32 +395,42 @@ async function semanticSearch(
   });
 
   if (matches.length === 0) {
-    const size = await context.semantic.size().catch(() => 0);
-    if (size === 0) {
+    const indexed = await context.semantic
+      .stats()
+      .then((stats) => stats.vectors)
+      .catch(() => 0);
+    if (indexed === 0) {
       notes.push(
-        'The semantic index is empty. It fills on the scheduled sync, or immediately by calling zotero_reindex.',
+        // A plain `zotero_reindex` resumes from the stored cursor, and if that
+        // cursor already covers the library it reports "nothing changed" and does
+        // nothing. Naming `full` is the difference between advice that works and
+        // advice that only looks like it should.
+        'The semantic index is empty. It fills on the scheduled sync, or immediately by calling zotero_reindex — with full=true if a plain call reports that nothing changed.',
       );
     }
     return empty;
   }
 
-  const scores = new Map(matches.map((match) => [match.itemKey, match.score]));
+  const scores = new Map<string, number>();
+  for (const match of matches) {
+    // Hybrid retrieval does not report a distance for every result.
+    if (match.score !== undefined) scores.set(match.itemKey, match.score);
+  }
   const keys = matches.map((match) => match.itemKey);
-  // Vectorize can only pre-filter fields that have a metadata index, and a
-  // metadata index has to exist before its vectors are written — so tags,
-  // `since` and negated item types are enforced here instead, by the lookup
-  // that fetches the item details anyway.
+  // AI Search can only push down the metadata fields declared on the instance,
+  // and it has no array type — so tags, `since` and negated item types are
+  // enforced here instead, by the lookup that fetches the item details anyway.
   const page = await context.zotero.getItems(
     { ...serverFilters(input), itemKey: keys.join(',') },
     keys.length,
   );
-  // Preserve similarity order; the API returns items in its own order.
+  // Preserve retrieval order; the API returns items in its own order.
   const byKey = new Map(page.items.map((item) => [item.key, item]));
   const ordered = keys
     .map((key) => byKey.get(key))
     .filter((item): item is ZoteroItem => Boolean(item))
     // `collections` is direct membership, which is what `/collections/<key>/items`
-    // returns without `recursive=1` — so this matches what keyword search saw,
+    // returns without `recursive=1` — so this matches what zotero_search sees,
     // without spending a second request to ask.
     .filter((item) => !input.collectionKey || item.data.collections?.includes(input.collectionKey))
     .filter((item) => withinYears(item, input));
@@ -348,8 +439,8 @@ async function semanticSearch(
   if (dropped > 0) {
     notes.push(
       narrowed
-        ? `${dropped} semantic match(es) were dropped: they fall outside the active filters, or no longer exist in Zotero.`
-        : `${dropped} semantic match(es) no longer exist in Zotero and were dropped.`,
+        ? `${dropped} match(es) were dropped: they fall outside the active filters, or no longer exist in Zotero.`
+        : `${dropped} match(es) no longer exist in Zotero and were dropped.`,
     );
   }
   return { items: ordered.slice(0, input.limit), scores };

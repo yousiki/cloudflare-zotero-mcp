@@ -4,6 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { SCOPE_READ, SCOPE_WRITE, type ZoteroMcpContext } from '../src/context.js';
 import { AttachmentReader } from '../src/core/attachment/read.js';
 import { AttachmentWriter } from '../src/core/attachment/write.js';
+import { MAX_SEMANTIC_ITEMS } from '../src/core/search/aisearch.js';
 import type { SemanticIndex, SemanticQueryOptions } from '../src/core/search/types.js';
 import { ZoteroClient } from '../src/core/zotero/client.js';
 import { createServer } from '../src/server.js';
@@ -72,15 +73,17 @@ interface StubSemanticIndex extends SemanticIndex {
 }
 
 /** A semantic index that answers with fixed matches, scores included. */
-function stubSemantic(matches: Array<{ itemKey: string; score: number }>): StubSemanticIndex {
+function stubSemantic(matches: Array<{ itemKey: string; score?: number }>): StubSemanticIndex {
   const calls: SemanticQueryOptions[] = [];
   return {
+    id: 'test-index',
     calls,
     query: async (_text, options = {}) => {
       calls.push(options);
       return matches;
     },
-    size: async () => matches.length,
+    stats: async () => ({ vectors: matches.length, queued: 0, running: 0, failed: 0 }),
+    ensure: async () => ({ created: false }),
     upsertItems: async () => 0,
     removeItems: async () => undefined,
   };
@@ -191,6 +194,7 @@ describe('MCP surface', () => {
       'zotero_reindex',
       'zotero_rename_attachments',
       'zotero_search',
+      'zotero_semantic_search',
       'zotero_update_item',
     ]);
 
@@ -204,7 +208,33 @@ describe('MCP surface', () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool]));
     expect(byName.get('zotero_search')?.annotations?.readOnlyHint).toBe(true);
+    expect(byName.get('zotero_semantic_search')?.annotations?.readOnlyHint).toBe(true);
     expect(byName.get('zotero_delete_items')?.annotations?.destructiveHint).toBe(true);
+  });
+
+  test('advertises no semantic parameter the index cannot honour', async () => {
+    const { tools } = await client.listTools();
+    const schema = tools.find((tool) => tool.name === 'zotero_semantic_search')?.inputSchema;
+    const properties = (schema?.properties ?? {}) as Record<string, { maximum?: number }>;
+
+    // The index holds no trashed items and no attachments, notes or annotations,
+    // so offering these would let a caller set something that cannot ever change
+    // the result.
+    expect(properties.includeTrashed).toBeUndefined();
+    // Ordering and text-scope belong to zotero_search; semantic order is fixed.
+    expect(properties.sort).toBeUndefined();
+    expect(properties.direction).toBeUndefined();
+    expect(properties.qmode).toBeUndefined();
+    expect(properties.citationKey).toBeUndefined();
+    // Above MAX_SEMANTIC_ITEMS the chunk overshoot no longer fits under the
+    // backend's cap, so a larger limit would quietly return fewer than asked.
+    expect(properties.limit?.maximum).toBe(MAX_SEMANTIC_ITEMS);
+
+    const keyword = tools.find((tool) => tool.name === 'zotero_search')?.inputSchema;
+    const keywordProperties = (keyword?.properties ?? {}) as Record<string, { maximum?: number }>;
+    expect(keywordProperties.includeTrashed).toBeDefined();
+    expect(keywordProperties.sort).toBeDefined();
+    expect(keywordProperties.limit?.maximum).toBe(100);
   });
 
   test('lists resources and prompts', async () => {
@@ -233,13 +263,13 @@ describe('MCP surface', () => {
     const context = testContext();
     const scoped = await connect(context);
 
-    await scoped.callTool({ name: 'zotero_search', arguments: { query: 'rlhf', mode: 'keyword' } });
+    await scoped.callTool({ name: 'zotero_search', arguments: { query: 'rlhf' } });
     // Zotero rejects multiple negations, so exactly one value must be sent.
     expect(lastItemsQuery(context).getAll('itemType')).toEqual(['-attachment']);
 
     await scoped.callTool({
       name: 'zotero_search',
-      arguments: { query: 'rlhf', mode: 'keyword', itemType: 'note' },
+      arguments: { query: 'rlhf', itemType: 'note' },
     });
     expect(lastItemsQuery(context).getAll('itemType')).toEqual(['note']);
   });
@@ -314,18 +344,20 @@ describe('MCP surface', () => {
 describe('semantic relevance', () => {
   interface ScoredResult {
     items: Array<{ key: string; score?: number }>;
-    minScore?: number;
-    belowThreshold?: number;
+    minScore: number;
+    scored: number;
+    belowThreshold: number;
+    unscored: number;
     note?: string;
   }
 
   async function search(
-    matches: Array<{ itemKey: string; score: number }>,
-    args: Record<string, unknown>,
+    matches: Array<{ itemKey: string; score?: number }>,
+    args: Record<string, unknown> = {},
   ): Promise<{ structured: ScoredResult; text: string }> {
     const client = await connect(testContext([SCOPE_READ], stubSemantic(matches)));
     const result = await client.callTool({
-      name: 'zotero_search',
+      name: 'zotero_semantic_search',
       arguments: { query: 'what makes a transformer work so well', ...args },
     });
     expect(result.isError).toBeFalsy();
@@ -334,16 +366,14 @@ describe('semantic relevance', () => {
   }
 
   test('returns weak matches rather than hiding them, and says which are weak', async () => {
-    // Vectorize returns the nearest topK however far away they are, so a query
-    // the library does not cover comes back looking like any other result set.
+    // Nearest-neighbour search returns its closest documents however far away
+    // they are, so a query the library does not cover comes back looking like
+    // any other result set.
     // Filtering would trade visible noise for invisible loss; flagging does not.
-    const { structured, text } = await search(
-      [
-        { itemKey: 'AAAA1111', score: 0.81 },
-        { itemKey: 'CCCC3333', score: 0.22 },
-      ],
-      { mode: 'semantic' },
-    );
+    const { structured, text } = await search([
+      { itemKey: 'AAAA1111', score: 0.81 },
+      { itemKey: 'CCCC3333', score: 0.22 },
+    ]);
 
     expect(structured.items.map((item) => item.score)).toEqual([0.81, 0.22]);
     expect(structured.minScore).toBe(0.5);
@@ -353,32 +383,34 @@ describe('semantic relevance', () => {
   });
 
   test('stays quiet when every match clears the floor', async () => {
-    const { structured } = await search([{ itemKey: 'AAAA1111', score: 0.77 }], {
-      mode: 'semantic',
-    });
+    const { structured } = await search([{ itemKey: 'AAAA1111', score: 0.77 }]);
     expect(structured.belowThreshold).toBe(0);
     expect(structured.note).toBeUndefined();
   });
 
   test('honours a caller-supplied floor', async () => {
-    const { structured } = await search([{ itemKey: 'AAAA1111', score: 0.62 }], {
-      mode: 'semantic',
-      minScore: 0.7,
-    });
+    const { structured } = await search([{ itemKey: 'AAAA1111', score: 0.62 }], { minScore: 0.7 });
     expect(structured.minScore).toBe(0.7);
     expect(structured.belowThreshold).toBe(1);
   });
 
-  test('leaves keyword matches unscored in auto mode', async () => {
-    // A missing score means "matched the text", not "scored zero" — conflating
-    // the two would make every keyword hit look irrelevant.
-    const { structured } = await search([{ itemKey: 'CCCC3333', score: 0.31 }], { mode: 'auto' });
+  test('reports a result with no similarity as unscored, not as scoring zero', async () => {
+    // Hybrid retrieval does not report a distance for every result. Absent means
+    // "no similarity reported", not "scored zero" — conflating the two would make
+    // such a hit look irrelevant, and would make belowThreshold look like it
+    // covered every row. `scored` is the denominator that says otherwise.
+    const { structured } = await search([
+      { itemKey: 'AAAA1111' },
+      { itemKey: 'CCCC3333', score: 0.22 },
+    ]);
     const byKey = new Map(structured.items.map((item) => [item.key, item.score]));
 
-    expect(byKey.get('CCCC3333')).toBe(0.31);
-    expect(byKey.has('AAAA1111')).toBe(true);
     expect(byKey.get('AAAA1111')).toBeUndefined();
+    expect(byKey.get('CCCC3333')).toBe(0.22);
     expect(structured.belowThreshold).toBe(1);
+    expect(structured.unscored).toBe(1);
+    expect(structured.scored).toBe(1);
+    expect(structured.note).toContain('without a similarity score');
   });
 });
 
@@ -400,8 +432,8 @@ describe('semantic filters', () => {
     const context = testContext([SCOPE_READ], index);
     const client = await connect(context);
     const result = await client.callTool({
-      name: 'zotero_search',
-      arguments: { query: 'what makes a transformer work so well', mode: 'semantic', ...args },
+      name: 'zotero_semantic_search',
+      arguments: { query: 'what makes a transformer work so well', ...args },
     });
     expect(result.isError).toBeFalsy();
     return {
@@ -411,9 +443,9 @@ describe('semantic filters', () => {
     };
   }
 
-  test('sends the same server-side filters keyword search sends', async () => {
-    // Vectorize can only pre-filter fields with a metadata index, so these ride
-    // along on the lookup that fetches the matched items' details.
+  test('sends the same server-side filters zotero_search sends', async () => {
+    // AI Search can only pre-filter the metadata fields declared on the instance,
+    // so these ride along on the lookup that fetches the matched items' details.
     const { itemsQuery } = await search([{ itemKey: 'AAAA1111', score: 0.8 }], {
       tags: ['transformers'],
       itemType: '-book',
@@ -466,21 +498,46 @@ describe('semantic filters', () => {
     expect(narrowed.index.calls[0]?.topK).toBe(21);
   });
 
-  test('auto mode cannot return a hit its keyword half would exclude', async () => {
-    // The bug this guards: semantic recall used to ignore every filter, so the
-    // merged result set half-obeyed the caller's constraints.
+  test('drops every match a filter excludes rather than widening the result', async () => {
+    // The bug this guards: semantic recall used to ignore the filters entirely, so
+    // a narrowed query came back only half-obeying the caller. With the only match
+    // outside the collection, the honest answer is nothing at all.
     const { structured } = await search([{ itemKey: 'AAAA1111', score: 0.9 }], {
-      mode: 'auto',
       collectionKey: 'COLL0001',
     });
 
-    expect(structured.items.map((item) => item.key)).toEqual(['DDDD4444']);
+    expect(structured.items).toEqual([]);
+    expect(structured.note).toContain('outside the active filters');
   });
 
   test('points at zotero_reindex when the index is empty', async () => {
     const { structured } = await search([], {});
     expect(structured.note).toContain('zotero_reindex');
     expect(structured.note).not.toContain('/admin/reindex');
+  });
+});
+describe('semantic search without a backend', () => {
+  test('names zotero_search instead of failing silently', async () => {
+    // `testContext` defaults `semantic` to null, which is what a deployment with
+    // no AI Search binding looks like. An empty result set would read as "the
+    // library has nothing", so this has to be an error the caller can act on.
+    const client = await connect(testContext([SCOPE_READ]));
+    const result = await client.callTool({
+      name: 'zotero_semantic_search',
+      arguments: { query: 'what do I have on sparse attention' },
+    });
+
+    expect(result.isError).toBe(true);
+    const message = JSON.stringify(result.content);
+    expect(message).toContain('zotero_search');
+  });
+
+  test('still lists the tool, so the error is reachable', async () => {
+    // Hiding it would make the failure a "no such tool" mystery instead of a
+    // message that says what to do next.
+    const client = await connect(testContext([SCOPE_READ]));
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name)).toContain('zotero_semantic_search');
   });
 });
 

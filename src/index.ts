@@ -5,7 +5,7 @@ import { type AuthProps, authorizationHandler } from './auth/handler.js';
 import { ALL_SCOPES, SCOPE_READ } from './context.js';
 import type { Env } from './env.js';
 import { buildContext, semanticIndex, syncBatchLimit, textCache, zoteroClient } from './env.js';
-import { syncVectorIndex } from './jobs/vectorize-sync.js';
+import { syncSemanticIndex } from './jobs/index-sync.js';
 import { createServer } from './server.js';
 
 /**
@@ -49,14 +49,14 @@ export default {
   /** Keeps the semantic index in step with the library. */
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
-      syncVectorIndex({
+      syncSemanticIndex({
         zotero: zoteroClient(env),
         index: semanticIndex(env),
         store: textCache(env),
         limit: syncBatchLimit(env),
       })
-        .then((report) => console.log('vectorize sync:', report.message))
-        .catch((error) => console.error('vectorize sync failed:', error)),
+        .then((report) => console.log('ai search sync:', report.message))
+        .catch((error) => console.error('ai search sync failed:', error)),
     );
   },
 } satisfies ExportedHandler<Env>;
