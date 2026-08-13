@@ -1,6 +1,6 @@
 {
   "name": "cloudflare-zotero-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Remote MCP server for Zotero libraries synced with WebDAV file storage, running on Cloudflare Workers",
   "// private": "Not an npm package — you deploy this Worker, you do not install it. Guards against an accidental publish; unrelated to the MIT license below.",
   "private": true,
