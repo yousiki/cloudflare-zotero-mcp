@@ -68,6 +68,21 @@ const DEFAULT_MIN_SCORE = 0.5;
  */
 const FILTER_OVERSHOOT = 3;
 
+/**
+ * Zotero cannot search Extra. `qmode=everything` is `titleCreatorYear` plus
+ * attachment full text, and neither half reads that field — so `q` can never
+ * find a citation key, and a lookup that sent one would come back empty no
+ * matter which item carries the key.
+ *
+ * Matching therefore happens here, over items the API hands back, which means
+ * paging the library instead of asking it a question. Hence a ceiling. A lookup
+ * that reaches it has not searched everything, so it says so rather than
+ * reporting a miss it cannot vouch for: at 100 items per request this is 20
+ * subrequests, and a library larger than this needs a filter to stay inside a
+ * Worker's budget.
+ */
+const CITATION_KEY_SCAN_LIMIT = 2000;
+
 /* -------------------------------------------------------------------------- */
 /* Shared input                                                               */
 /* -------------------------------------------------------------------------- */
@@ -208,19 +223,7 @@ export function registerSearchTools(server: McpServer, context: ZoteroMcpContext
       const notes: string[] = [];
 
       if (input.citationKey) {
-        const items = await keywordSearch(context.zotero, {
-          ...input,
-          query: input.citationKey,
-          qmode: 'everything',
-        });
-        // `q` matches Extra as free text, so narrow to an exact Citation Key line.
-        const exact = items.filter((item) =>
-          new RegExp(
-            `^\\s*Citation Key:\\s*${escapeRegExp(input.citationKey as string)}\\s*$`,
-            'im',
-          ).test(String(item.data.extra ?? '')),
-        );
-        return respondKeyword(exact.length > 0 ? exact : items, notes);
+        return respondKeyword(await citationKeySearch(context.zotero, input, notes), notes);
       }
 
       return respondKeyword(await keywordSearch(context.zotero, input), notes);
@@ -374,6 +377,54 @@ async function keywordSearch(zotero: ZoteroClient, input: KeywordInput): Promise
     ? await zotero.getCollectionItems(input.collectionKey, query, wanted)
     : await zotero.getItems(query, wanted);
   return page.items.filter((item) => withinYears(item, input)).slice(0, input.limit);
+}
+
+/**
+ * Better BibTeX writes the key on its own line in Extra, so the match is
+ * anchored to a whole line. A citation key is an identifier: a substring match
+ * would let `gu2023` return `gu2023mamba`, which is a different paper.
+ */
+function hasCitationKey(item: ZoteroItem, citationKey: string): boolean {
+  return new RegExp(`^\\s*Citation Key:\\s*${escapeRegExp(citationKey)}\\s*$`, 'im').test(
+    String(item.data.extra ?? ''),
+  );
+}
+
+/**
+ * Looks an item up by Better BibTeX citation key. Every filter the caller gave
+ * still pushes down, but no `q` is sent: it cannot reach Extra, and narrowing the
+ * candidates by text would only hide the item this is trying to find. Only
+ * top-level items are scanned — Better BibTeX assigns keys there, and skipping
+ * child items roughly halves the pages a library-wide scan has to walk.
+ */
+async function citationKeySearch(
+  zotero: ZoteroClient,
+  input: KeywordInput,
+  notes: string[],
+): Promise<ZoteroItem[]> {
+  const citationKey = input.citationKey as string;
+  const query: QueryParams = {
+    ...serverFilters(input),
+    sort: input.sort,
+    direction: input.direction,
+  };
+
+  const page = input.collectionKey
+    ? await zotero.getCollectionItems(input.collectionKey, query, CITATION_KEY_SCAN_LIMIT, true)
+    : await zotero.getTopItems(query, CITATION_KEY_SCAN_LIMIT);
+
+  const found = page.items.filter(
+    (item) => hasCitationKey(item, citationKey) && withinYears(item, input),
+  );
+
+  // An exhausted scan that found nothing is a real miss; a truncated one is not,
+  // and the difference decides whether the caller should try again differently.
+  if (found.length === 0 && page.items.length >= CITATION_KEY_SCAN_LIMIT) {
+    notes.push(
+      `The scan stopped after ${CITATION_KEY_SCAN_LIMIT} items without reaching the end of the library, so citation key "${citationKey}" may still exist beyond it. Narrow the search with collectionKey, tags or itemType to cover the rest.`,
+    );
+  }
+  return found.slice(0, input.limit);
 }
 
 async function semanticSearch(
