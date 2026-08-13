@@ -29,6 +29,13 @@
   // PDF text extraction is CPU bound; the default 30s is plenty but be explicit.
   "limits": { "cpu_ms": 30000 },
 
+  // Nearly every request fans out to api.zotero.org and the user's WebDAV server,
+  // often several round trips deep (search -> get item -> fetch attachment), so
+  // the worker is latency bound on those hops rather than on the client one.
+  // Smart placement lets Cloudflare run it near those origins instead of near
+  // the client, which is also where the cron sync does all of its work.
+  "placement": { "mode": "smart" },
+
   // No ids: wrangler provisions these on first `dev`/`deploy` and writes the
   // ids back here. OAUTH_KV holds OAuth clients, grants and tokens; CACHE_KV
   // holds the extracted-text cache and the semantic sync cursor.
