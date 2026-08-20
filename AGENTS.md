@@ -41,8 +41,8 @@ rather than failing the request. `ZoteroClient.writeObjects` re-indexes those ma
 batches so index `50` in batch two does not collide with index `0` in batch one. Use
 `summarizeWrite` + `assertNoFailures` rather than assuming success.
 
-**Attachment order.** Item first (it allocates the key), then WebDAV, then `md5`/`mtime`. See the
-README section on WebDAV writes for why.
+**Attachment order.** Item first (it allocates the key), then WebDAV, then `md5`/`mtime`. See
+[docs/deployment.md](docs/deployment.md#how-webdav-writes-work) for why.
 
 **Zip contents.** Zotero packs its full-text cache into the same archive. `unzipAttachment` drops
 dot-prefixed entries and throws if nothing else is left — never return the cache as the file.
@@ -233,7 +233,7 @@ run only because `since` advances after `pending` drains, never before.
 4. Throw plain `Error`s with actionable messages. The SDK turns them into `isError` results, so the
    model sees the message and can correct itself.
 5. Add the tool name to the catalogue assertion in `test/server.test.ts`, and the table in
-   `README.md`.
+   `README.md` and `README.zh-CN.md`.
 
 ## Testing
 
