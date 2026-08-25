@@ -1,6 +1,6 @@
 {
   "name": "cloudflare-zotero-mcp",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Remote MCP server for Zotero libraries synced with WebDAV file storage, running on Cloudflare Workers",
   "// private": "Not an npm package — you deploy this Worker, you do not install it. Guards against an accidental publish; unrelated to the MIT license below.",
   "private": true,
@@ -24,7 +24,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "bun run scripts/deploy.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "wrangler types && tsc --noEmit",
     "test": "bun test",
     "lint": "biome lint .",
     "format": "biome format --write .",
@@ -34,16 +34,16 @@
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.10.3",
     "@modelcontextprotocol/server": "^2.0.0",
-    "fflate": "^0.8.2",
-    "unpdf": "^1.8.0",
-    "zod": "^4.0.0"
+    "fflate": "^0.8.3",
+    "unpdf": "1.8.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.0.0",
-    "@cloudflare/workers-types": "^4.20260101.0",
+    "@biomejs/biome": "^2.5.10",
     "@modelcontextprotocol/client": "^2.0.0",
-    "@types/bun": "^1.3.0",
-    "typescript": "^5.9.0",
-    "wrangler": "^4.0.0"
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.3.0",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.125.0"
   }
 }
