@@ -39,23 +39,23 @@ Desktop, Cursor, anything that speaks MCP — can read and write the same librar
 
 ```bash
 git clone https://github.com/yousiki/cloudflare-zotero-mcp && cd cloudflare-zotero-mcp
-bun install
-
+mise install
+mise exec -- bun install
 # 1. Secrets
-bun x wrangler secret put ZOTERO_API_KEY      # zotero.org/settings/keys, read+write
-bun x wrangler secret put WEBDAV_URL          # the URL you gave Zotero; "/zotero" is appended
-bun x wrangler secret put WEBDAV_USERNAME
-bun x wrangler secret put WEBDAV_PASSWORD
-bun x wrangler secret put AUTH_PASSWORD       # gates the OAuth login page — make it long
+mise exec -- bun x wrangler secret put ZOTERO_API_KEY      # zotero.org/settings/keys, read+write
+mise exec -- bun x wrangler secret put WEBDAV_URL          # the URL you gave Zotero; "/zotero" is appended
+mise exec -- bun x wrangler secret put WEBDAV_USERNAME
+mise exec -- bun x wrangler secret put WEBDAV_PASSWORD
+mise exec -- bun x wrangler secret put AUTH_PASSWORD       # gates the OAuth login page — make it long
 
 # 2. Ship. ZOTERO_MCP_DOMAIN is any hostname in a zone on this Cloudflare account;
 #    the Custom Domain, KV namespaces and AI Search namespace are created for you.
 export ZOTERO_MCP_DOMAIN=zotero-mcp.example.com
-bun run deploy
+mise exec -- bun run deploy
 
 # 3. Build the semantic index (the cron job would get there eventually).
-bun run scripts/get-token.ts "https://$ZOTERO_MCP_DOMAIN" --out .token
-bun run scripts/reindex.ts "https://$ZOTERO_MCP_DOMAIN/mcp" "$(cat .token)" --full
+mise exec -- bun run scripts/get-token.ts "https://$ZOTERO_MCP_DOMAIN" --out .token
+mise exec -- bun run scripts/reindex.ts "https://$ZOTERO_MCP_DOMAIN/mcp" "$(cat .token)" --full
 ```
 
 Then connect a client — the server is a normal OAuth-protected MCP endpoint at
@@ -110,9 +110,9 @@ Resources: `zotero://item/{key}`, `zotero://attachment/{key}` (raw file),
 ## Development
 
 ```bash
-bun test                      # unit + protocol tests, no network
-bun run typecheck && bun run lint
-cp .dev.vars.example .dev.vars && bun run dev
+mise exec -- bun test                      # unit + protocol tests, no network
+mise exec -- bun run typecheck && mise exec -- bun run lint
+cp .dev.vars.example .dev.vars && mise exec -- bun run dev
 ```
 
 AI Search has no local emulation, so `zotero_semantic_search` errors under `wrangler dev`; add

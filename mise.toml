@@ -1,0 +1,4 @@
+[tools]
+# Bun is the project's runtime, package manager, test runner, and script launcher.
+# Wrangler, Biome, TypeScript, and the MCP SDKs stay project-local in package.json.
+bun = "latest"
