@@ -90,11 +90,20 @@ Zotero 的 `POST /items/<key>/file` 上传流程是 Zotero File Storage 订阅�
 库，API 允许直接写入 `md5` 和 `mtime`，因此一次上传是：
 
 1. 创建附件条目——这一步分配 key，WebDAV 文件名由它构成。
-2. 向 WebDAV `PUT {key}.zip`（deflate 压缩的文件）和 `PUT {key}.prop`（`<mtime>` + `<hash>`）。
+2. 向 WebDAV 流式 `PUT {key}.zip`（stored、不压缩）和 `PUT {key}.prop`（`<mtime>` + `<hash>`）。
 3. `PATCH` 条目，写入 `filename`、`md5` 和 `mtime`。
 
 顺序很重要：如果第 2 步失败，条目只是没有 hash，Zotero 把它理解为"尚未上传"而不是损坏的
 附件。读取则反向进行，并跳过 Zotero 打包进压缩档的簿记文件（`.zotero-ft-cache`、
 `.zotero-ft-info`）。
+
+约 50–100 MB 的开放获取 PDF 会以流的方式穿过 Worker，isolate 里不会同时放下 PDF 和 zip。
+上限是 95 MB，这样 stored zip 仍低于 100 MB 的请求体限制。`base64Data` 上传仍是 40 MB，
+因为那段 payload 已经在内存里。
+
+WebDAV PUT 上的 Cloudflare HTTP 530 是 Origin DNS。Worker `fetch` 打到橙云 Tunnel 主机名
+时经常 530，尤其开了 smart placement。WebDAV 继续通过 Tunnel 对公网开放，但把 DAV 主机名
+设成灰云（仅 DNS），让 Worker 直连 Tunnel origin。如果主机名必须保持橙云，把
+`WEBDAV_RESOLVE_OVERRIDE` 设成 `*.cfargotunnel.com` origin。Zotero Desktop 仍用同一个公网 URL。
 
 **上传的文件要等 Zotero Desktop 同步后才会出现。** 文件没有立刻显示不代表出了问题。

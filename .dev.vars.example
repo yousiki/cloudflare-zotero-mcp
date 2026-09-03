@@ -8,6 +8,8 @@ ZOTERO_LIBRARY_TYPE=user
 WEBDAV_URL=
 WEBDAV_USERNAME=
 WEBDAV_PASSWORD=
+# Optional: Tunnel origin hostname if WEBDAV_URL is orange-clouded.
+WEBDAV_RESOLVE_OVERRIDE=
 
 # Password for the OAuth login page at /authorize.
 AUTH_PASSWORD=

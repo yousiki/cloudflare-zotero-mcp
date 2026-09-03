@@ -2,13 +2,18 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { assertWritable, type ZoteroMcpContext } from '../context.js';
 import { guessContentType } from '../core/attachment/read.js';
+import { MAX_REMOTE_FILE_BYTES, openRemoteFile } from '../core/attachment/remote.js';
 import { DEFAULT_RENAME_TEMPLATE } from '../core/attachment/rename.js';
 import { truncate } from '../core/format/items.js';
 import { base64Decode } from '../core/http.js';
 import type { ZoteroItem } from '../core/zotero/types.js';
 import { objectKey, tagSchema, textResult } from './common.js';
 
-/** Refuse to pull absurd files into a 128 MB isolate. */
+/**
+ * Cap for `base64Data` uploads. That payload is already in isolate memory
+ * (and larger in JSON), so streaming cannot save it. URL fetches use
+ * `MAX_REMOTE_FILE_BYTES` instead.
+ */
 const MAX_UPLOAD_BYTES = 40 * 1024 * 1024;
 
 export function registerAttachmentTools(server: McpServer, context: ZoteroMcpContext): void {
@@ -180,20 +185,41 @@ function registerPut(server: McpServer, context: ZoteroMcpContext): void {
     },
     async (input) => {
       assertWritable(context);
-      const { data, filename } = await resolveUpload(input);
+      const upload = await resolveUpload(input);
+      const filename = input.filename ?? upload.filename;
+      const contentType = input.contentType ?? guessContentType(filename);
 
       const result = input.replaceAttachmentKey
-        ? await context.writer.replace(input.replaceAttachmentKey, data, input.filename ?? filename)
-        : await context.writer.create({
-            parentItemKey: input.parentItemKey,
-            filename: input.filename ?? filename,
-            contentType: input.contentType ?? guessContentType(input.filename ?? filename),
-            data,
-            title: input.title,
-            url: input.sourceUrl,
-            tags: input.tags,
-            collections: input.collections,
-          });
+        ? 'data' in upload
+          ? await context.writer.replace(input.replaceAttachmentKey, upload.data, filename)
+          : await context.writer.replaceFromStream(
+              input.replaceAttachmentKey,
+              upload.body,
+              filename,
+              upload.byteLength,
+            )
+        : 'data' in upload
+          ? await context.writer.create({
+              parentItemKey: input.parentItemKey,
+              filename,
+              contentType,
+              data: upload.data,
+              title: input.title,
+              url: input.sourceUrl,
+              tags: input.tags,
+              collections: input.collections,
+            })
+          : await context.writer.createFromStream({
+              parentItemKey: input.parentItemKey,
+              filename,
+              contentType,
+              body: upload.body,
+              byteLength: upload.byteLength,
+              title: input.title,
+              url: input.sourceUrl,
+              tags: input.tags,
+              collections: input.collections,
+            });
 
       return textResult(
         [
@@ -215,11 +241,15 @@ function registerPut(server: McpServer, context: ZoteroMcpContext): void {
   );
 }
 
+type ResolvedUpload =
+  | { data: Uint8Array; filename: string }
+  | { body: ReadableStream<Uint8Array>; byteLength?: number; filename: string };
+
 async function resolveUpload(input: {
   sourceUrl?: string;
   base64Data?: string;
   filename?: string;
-}): Promise<{ data: Uint8Array; filename: string }> {
+}): Promise<ResolvedUpload> {
   if (input.sourceUrl && input.base64Data) {
     throw new Error('Provide either sourceUrl or base64Data, not both.');
   }
@@ -239,30 +269,11 @@ async function resolveUpload(input: {
 
   if (!input.sourceUrl) throw new Error('Provide sourceUrl or base64Data.');
 
-  const response = await fetch(input.sourceUrl, {
-    headers: {
-      'User-Agent': 'cloudflare-zotero-mcp (+https://github.com/yousiki/cloudflare-zotero-mcp)',
-    },
-    redirect: 'follow',
-  });
-  if (!response.ok) {
-    throw new Error(`Downloading ${input.sourceUrl} failed with ${response.status}.`);
-  }
-
-  const declared = Number(response.headers.get('Content-Length') ?? Number.NaN);
-  if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
-    throw new Error(`Remote file is ${declared} bytes, over the ${MAX_UPLOAD_BYTES} byte limit.`);
-  }
-  const buffer = await response.arrayBuffer();
-  if (buffer.byteLength > MAX_UPLOAD_BYTES) {
-    throw new Error(
-      `Remote file is ${buffer.byteLength} bytes, over the ${MAX_UPLOAD_BYTES} byte limit.`,
-    );
-  }
-
+  const remote = await openRemoteFile(input.sourceUrl, { maxBytes: MAX_REMOTE_FILE_BYTES });
   const fromUrl = decodeURIComponent(new URL(input.sourceUrl).pathname.split('/').pop() ?? '');
   return {
-    data: new Uint8Array(buffer),
+    body: remote.stream,
+    byteLength: remote.byteLength,
     filename: input.filename ?? (fromUrl.includes('.') ? fromUrl : 'attachment.pdf'),
   };
 }

@@ -103,12 +103,22 @@ Zotero's `POST /items/<key>/file` upload flow is exclusive to Zotero File Storag
 libraries the API instead lets you write `md5` and `mtime` directly, so an upload is:
 
 1. Create the attachment item — that allocates the key the WebDAV filenames are built from.
-2. `PUT {key}.zip` (the file, deflated) and `PUT {key}.prop` (`<mtime>` + `<hash>`) to WebDAV.
+2. Stream `PUT {key}.zip` (the file, stored uncompressed) and `PUT {key}.prop` (`<mtime>` + `<hash>`) to WebDAV.
 3. `PATCH` the item with `filename`, `md5` and `mtime`.
 
 The order matters: if step 2 fails, the item is simply left without a hash, which Zotero reads
 as "not uploaded yet" rather than as a broken attachment. Reads go the other way and skip the
 bookkeeping entries (`.zotero-ft-cache`, `.zotero-ft-info`) that Zotero packs into the archive.
+
+OA PDFs of roughly 50–100 MB are streamed through the Worker: the isolate never holds the PDF
+and the zip at the same time. The cap is 95 MB so the stored zip still fits under the 100 MB
+request-body limit. `base64Data` uploads stay at 40 MB because that payload is already in memory.
+
+Cloudflare HTTP 530 on a WebDAV PUT is Origin DNS. A Worker `fetch` to an orange-cloud Tunnel
+hostname often 530s, especially with smart placement. Keep WebDAV public via Tunnel, but
+grey-cloud the DAV hostname (DNS-only) so the Worker talks to the Tunnel origin directly. If
+the hostname must stay orange-clouded, set `WEBDAV_RESOLVE_OVERRIDE` to the `*.cfargotunnel.com`
+origin. Zotero Desktop can keep using the same public URL.
 
 **Uploads appear in Zotero Desktop only after it syncs.** Nothing is wrong if a file does not
 show up immediately.

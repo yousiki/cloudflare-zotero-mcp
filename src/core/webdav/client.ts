@@ -8,8 +8,16 @@ export class WebDavError extends Error {
     readonly url: string,
     body: string,
   ) {
-    super(`WebDAV ${method} ${url} failed with ${status}${body ? `: ${body.slice(0, 300)}` : ''}`);
+    super(WebDavError.format(status, method, url, body));
     this.name = 'WebDavError';
+  }
+
+  private static format(status: number, method: string, url: string, body: string): string {
+    const hint =
+      status === 530
+        ? ' Cloudflare 530 is Origin DNS. If WEBDAV_URL is an orange-cloud Tunnel hostname, grey-cloud it or set WEBDAV_RESOLVE_OVERRIDE to the tunnel origin.'
+        : '';
+    return `WebDAV ${method} ${url} failed with ${status}${body ? `: ${body.slice(0, 300)}` : ''}${hint}`;
   }
 }
 
@@ -22,6 +30,11 @@ export interface WebDavClientOptions {
   maxRetries?: number;
   /** Refuse to buffer archives larger than this (default 64 MiB). */
   maxDownloadBytes?: number;
+  /**
+   * Cloudflare `cf.resolveOverride`. Use the Tunnel origin hostname when
+   * WEBDAV_URL is an orange-cloud custom hostname (that pairing 530s from a Worker).
+   */
+  resolveOverride?: string;
 }
 
 export class WebDavClient {
@@ -31,6 +44,7 @@ export class WebDavClient {
   private readonly limiter = new Limiter(3);
   private readonly maxRetries: number;
   private readonly maxDownloadBytes: number;
+  private readonly resolveOverride?: string;
 
   constructor(options: WebDavClientOptions) {
     const trimmed = options.url.trim().replace(/\/+$/, '');
@@ -41,6 +55,7 @@ export class WebDavClient {
     this.doFetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.maxRetries = options.maxRetries ?? 3;
     this.maxDownloadBytes = options.maxDownloadBytes ?? 64 * 1024 * 1024;
+    this.resolveOverride = options.resolveOverride;
   }
 
   private url(name: string): string {
@@ -51,15 +66,25 @@ export class WebDavClient {
     url: string,
     init: RequestInit & { method: string },
     allowedStatuses: number[] = [],
+    options: { retry?: boolean } = {},
   ): Promise<Response> {
+    const retry = options.retry ?? true;
     let attempt = 0;
     for (;;) {
       const headers = new Headers(init.headers);
       headers.set('Authorization', this.auth);
-      const response = await this.limiter.run(() => this.doFetch(url, { ...init, headers }));
+      const requestInit: RequestInit = { ...init, headers };
+      if (this.resolveOverride) {
+        (requestInit as RequestInit & { cf?: { resolveOverride: string } }).cf = {
+          resolveOverride: this.resolveOverride,
+        };
+      }
+      const response = await this.limiter.run(() => this.doFetch(url, requestInit));
 
       const retryable =
-        response.status === 429 || (response.status >= 500 && response.status < 600);
+        retry &&
+        (response.status === 429 ||
+          (response.status >= 500 && response.status < 600 && response.status !== 530));
       if (retryable && attempt < this.maxRetries) {
         const retryAfter = parseRetryAfter(response.headers.get('Retry-After'));
         await sleep(retryAfter > 0 ? retryAfter * 1000 : 2 ** attempt * 400);
@@ -133,6 +158,30 @@ export class WebDavClient {
       headers: { 'Content-Type': 'application/zip' },
       body: zipped as unknown as BodyInit,
     });
+  }
+
+  /**
+   * PUT a zip as a stream. `contentLength` is set when known so WebDAV servers
+   * that reject chunked PUT still accept the body. Streamed bodies are not
+   * retried — the source cannot be replayed.
+   */
+  async putZipStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    contentLength?: number,
+  ): Promise<void> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/zip' };
+    if (contentLength !== undefined) headers['Content-Length'] = String(contentLength);
+    await this.send(
+      this.url(`${key}.zip`),
+      {
+        method: 'PUT',
+        headers,
+        body,
+      },
+      [],
+      { retry: false },
+    );
   }
 
   async putProp(key: string, props: AttachmentProps): Promise<void> {

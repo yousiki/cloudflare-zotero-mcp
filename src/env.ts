@@ -33,6 +33,7 @@ export interface Env {
   RERANKING_MODEL?: string;
   AI_SEARCH_INSTANCE?: string;
   SYNC_BATCH_LIMIT?: string;
+  WEBDAV_RESOLVE_OVERRIDE?: string;
 }
 
 export class ConfigError extends Error {
@@ -59,6 +60,7 @@ export function webdavClient(env: Env): WebDavClient | null {
     url: env.WEBDAV_URL,
     username: env.WEBDAV_USERNAME,
     password: env.WEBDAV_PASSWORD,
+    resolveOverride: env.WEBDAV_RESOLVE_OVERRIDE,
   });
 }
 
