@@ -1,15 +1,28 @@
 import { md5Hex } from '../http.js';
 import type { WebDavClient } from '../webdav/client.js';
-import { zipAttachment } from '../webdav/zip.js';
+import { zipAttachment, zipStoredStream } from '../webdav/zip.js';
 import type { ZoteroClient } from '../zotero/client.js';
 import type { ZoteroItem, ZoteroTag } from '../zotero/types.js';
 import { AttachmentError, guessContentType } from './read.js';
+import { hashAndCount, zipLengthFor } from './remote.js';
 import { buildRenamedFilename, extensionOf, getValidFileName } from './rename.js';
 
 export interface CreateAttachmentInput {
   parentItemKey?: string;
   filename: string;
   data: Uint8Array;
+  contentType?: string;
+  title?: string;
+  url?: string;
+  tags?: ZoteroTag[];
+  collections?: string[];
+}
+
+export interface CreateAttachmentFromStreamInput {
+  parentItemKey?: string;
+  filename: string;
+  body: ReadableStream<Uint8Array>;
+  byteLength?: number;
   contentType?: string;
   title?: string;
   url?: string;
@@ -90,6 +103,52 @@ export class AttachmentWriter {
     return { attachmentKey, filename, bytes: input.data.length, ...uploaded };
   }
 
+  /**
+   * Same as `create`, but the file is a stream. Used for OA PDFs that would
+   * OOM the isolate if buffered, then zipped, then PUTted.
+   */
+  async createFromStream(input: CreateAttachmentFromStreamInput): Promise<AttachmentWriteResult> {
+    const webdav = this.requireWebdav();
+    const filename = getValidFileName(input.filename);
+    const contentType = input.contentType ?? guessContentType(filename);
+
+    const template = await this.zotero.getTemplate('attachment', 'imported_file');
+    const payload: Record<string, unknown> = {
+      ...template,
+      itemType: 'attachment',
+      linkMode: 'imported_file',
+      title: input.title ?? filename,
+      filename,
+      contentType,
+      tags: input.tags ?? [],
+      collections: input.collections ?? [],
+    };
+    if (input.parentItemKey) payload.parentItem = input.parentItemKey;
+    if (input.url) payload.url = input.url;
+    delete payload.md5;
+    delete payload.mtime;
+
+    const response = await this.zotero.writeObjects('items', [payload]);
+    const attachmentKey = response.success['0'];
+    if (!attachmentKey) {
+      const failure = response.failed['0'];
+      throw new AttachmentError(
+        `Zotero refused to create the attachment item: ${failure?.message ?? JSON.stringify(response)}`,
+      );
+    }
+
+    const uploaded = await this.uploadStream(
+      webdav,
+      attachmentKey,
+      filename,
+      input.body,
+      input.byteLength,
+    );
+    await this.recordFile(attachmentKey, { filename, ...uploaded });
+
+    return { attachmentKey, filename, ...uploaded };
+  }
+
   /** Swaps the bytes behind an existing attachment, keeping its item and key. */
   async replace(
     attachmentKey: string,
@@ -107,6 +166,25 @@ export class AttachmentWriter {
     await this.recordFile(attachmentKey, { filename: targetName, ...uploaded }, attachment.version);
 
     return { attachmentKey, filename: targetName, bytes: data.length, ...uploaded };
+  }
+
+  async replaceFromStream(
+    attachmentKey: string,
+    body: ReadableStream<Uint8Array>,
+    filename?: string,
+    byteLength?: number,
+  ): Promise<AttachmentWriteResult> {
+    const webdav = this.requireWebdav();
+    const attachment = await this.zotero.getItem(attachmentKey);
+    assertStoredFile(attachment);
+
+    const targetName = getValidFileName(
+      filename ?? attachment.data.filename ?? `${attachmentKey}.pdf`,
+    );
+    const uploaded = await this.uploadStream(webdav, attachmentKey, targetName, body, byteLength);
+    await this.recordFile(attachmentKey, { filename: targetName, ...uploaded }, attachment.version);
+
+    return { attachmentKey, filename: targetName, ...uploaded };
   }
 
   /**
@@ -174,6 +252,22 @@ export class AttachmentWriter {
     await webdav.putZip(key, zipAttachment(filename, data));
     await webdav.putProp(key, { mtime, hash: md5 });
     return { md5, mtime };
+  }
+
+  private async uploadStream(
+    webdav: WebDavClient,
+    key: string,
+    filename: string,
+    body: ReadableStream<Uint8Array>,
+    byteLength?: number,
+  ): Promise<{ md5: string; mtime: number; bytes: number }> {
+    const counted = hashAndCount(body);
+    const zipBody = zipStoredStream(filename, counted.stream);
+    await webdav.putZipStream(key, zipBody, zipLengthFor(filename, byteLength));
+    const md5 = counted.hasher.digest();
+    const mtime = Date.now();
+    await webdav.putProp(key, { mtime, hash: md5 });
+    return { md5, mtime, bytes: counted.bytes() };
   }
 
   private async recordFile(

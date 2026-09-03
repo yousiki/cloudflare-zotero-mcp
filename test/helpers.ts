@@ -29,7 +29,15 @@ export function stubFetch(routes: StubRoute[]): FetchStub {
     new Headers(init?.headers).forEach((value, key) => {
       headers[key.toLowerCase()] = value;
     });
-    const binaryBody = init?.body instanceof Uint8Array ? init.body : undefined;
+    let binaryBody: Uint8Array | undefined =
+      init?.body instanceof Uint8Array ? init.body : undefined;
+    if (
+      !binaryBody &&
+      typeof ReadableStream !== 'undefined' &&
+      init?.body instanceof ReadableStream
+    ) {
+      binaryBody = new Uint8Array(await new Response(init.body).arrayBuffer());
+    }
     const body = typeof init?.body === 'string' ? init.body : undefined;
 
     const request: RecordedRequest = {

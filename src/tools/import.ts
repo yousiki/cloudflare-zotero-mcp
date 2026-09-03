@@ -1,14 +1,13 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { assertWritable, type ZoteroMcpContext } from '../context.js';
+import { openRemotePdf } from '../core/attachment/remote.js';
 import { buildRenamedFilename } from '../core/attachment/rename.js';
 import { formatItemList } from '../core/format/items.js';
 import { detectIdentifier } from '../core/sources/identifiers.js';
 import { type ResolvedReference, resolveReference } from '../core/sources/metadata.js';
 import type { ZoteroItem } from '../core/zotero/types.js';
 import { assertNoFailures, objectKey, summarizeWrite, tagSchema, textResult } from './common.js';
-
-const MAX_PDF_BYTES = 40 * 1024 * 1024;
 
 export function registerImportTools(server: McpServer, context: ZoteroMcpContext): void {
   server.registerTool(
@@ -142,39 +141,21 @@ async function attachPdfFrom(
   parentItemKey: string,
   url: string,
 ): Promise<string> {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'cloudflare-zotero-mcp (+https://github.com/yousiki/cloudflare-zotero-mcp)',
-    },
-    redirect: 'follow',
-  });
-  if (!response.ok) throw new Error(`the server returned ${response.status}`);
-
-  const contentType = (response.headers.get('Content-Type') ?? '').split(';')[0]?.trim() ?? '';
-  const buffer = await response.arrayBuffer();
-  if (buffer.byteLength > MAX_PDF_BYTES) {
-    throw new Error(`the file is ${buffer.byteLength} bytes, over the ${MAX_PDF_BYTES} byte limit`);
-  }
-  const data = new Uint8Array(buffer);
-
-  // Landing pages masquerade as downloads often enough to be worth checking.
-  const looksLikePdf = data[0] === 0x25 && data[1] === 0x50 && data[2] === 0x44 && data[3] === 0x46;
-  if (!looksLikePdf) {
-    throw new Error(`the response was ${contentType || 'not a PDF'} rather than a PDF`);
-  }
+  const remote = await openRemotePdf(url);
 
   // Name it through the same template the rename tool uses, reading the parent
   // back for Zotero's own `creatorSummary`. Hand-rolling the name here produced
   // files that `zotero_rename_attachments` then wanted to rename immediately:
   // no "et al.", no character sanitising, and a byte cap that could eat ".pdf".
   const parent = await context.zotero.getItem(parentItemKey);
-  const result = await context.writer.create({
+  const result = await context.writer.createFromStream({
     parentItemKey,
     filename: buildRenamedFilename(parent.data, 'attachment.pdf', undefined, {
       creatorSummary: parent.meta?.creatorSummary,
     }),
     contentType: 'application/pdf',
-    data,
+    body: remote.stream,
+    byteLength: remote.byteLength,
     title: 'Full Text PDF',
     url,
   });

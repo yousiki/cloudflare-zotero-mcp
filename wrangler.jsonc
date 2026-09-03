@@ -66,4 +66,6 @@
   //   WEBDAV_USERNAME
   //   WEBDAV_PASSWORD
   //   AUTH_PASSWORD      - password for the /authorize login page
+  // Optional var WEBDAV_RESOLVE_OVERRIDE: Tunnel origin hostname when WEBDAV_URL
+  // is an orange-cloud custom hostname (Worker fetches then 530 Origin DNS).
 }
